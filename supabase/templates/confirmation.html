@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Confirm your Eventify email</title>
+  </head>
+  <body style="margin:0;background:#f5f4fa;font-family:Arial,Helvetica,sans-serif;color:#211d32;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f4fa;padding:32px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:16px;overflow:hidden;">
+            <tr>
+              <td style="padding:28px 36px;background:#261a45;color:#ffffff;font-size:23px;font-weight:700;">
+                Eventify
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:36px;">
+                <h1 style="margin:0 0 16px;font-size:26px;line-height:1.3;">Welcome to Eventify!</h1>
+                <p style="margin:0 0 24px;color:#625d70;font-size:16px;line-height:1.6;">
+                  Thanks for joining your campus community. Confirm your email address to activate your account and start discovering events.
+                </p>
+                <p style="margin:0 0 28px;">
+                  <a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:14px 24px;border-radius:9px;background:#7452e8;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;">
+                    Confirm Email
+                  </a>
+                </p>
+                <p style="margin:0 0 10px;color:#625d70;font-size:14px;line-height:1.6;">
+                  If the button does not work, copy and paste this link into your browser:
+                </p>
+                <p style="margin:0;word-break:break-all;font-size:13px;line-height:1.6;">
+                  <a href="{{ .ConfirmationURL }}" style="color:#6041d2;">{{ .ConfirmationURL }}</a>
+                </p>
+                <p style="margin:28px 0 0;color:#817c8c;font-size:13px;line-height:1.6;">
+                  If you did not create an Eventify account, you can ignore this email.
+                </p>
+              </td>
+            </tr>
+          </table>
+          <p style="margin:18px 0 0;color:#817c8c;font-size:12px;">Eventify · Campus experiences, all in one place</p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

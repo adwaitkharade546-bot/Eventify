@@ -1,0 +1,11 @@
+{
+  "title": "Eventify",
+  "description": "Streamline event management for colleges with an intuitive platform for discovering, registering, and organizing events, workshops, and competitions.",
+  "robots": {
+    "index": true
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
