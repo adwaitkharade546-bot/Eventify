@@ -4,7 +4,7 @@ import { supabase } from "./lib/supabase"
 type UserRole = "participant" | "organizer"
 type OrganizerStatus = "not_requested" | "pending" | "approved" | "rejected"
 type EventStatus = "draft" | "published" | "completed" | "cancelled"
-type Page = "home" | "explore" | "details" | "login" | "participant-login" | "organizer-login" | "signup" | "organizer-signup" | "participant-signup" | "register" | "review" | "confirmation" | "dashboard" | "profile" | "organizer" | "admin" | "notifications"
+type Page = "home" | "explore" | "details" | "login" | "participant-login" | "organizer-login" | "signup" | "organizer-signup" | "participant-signup" | "register" | "review" | "confirmation" | "email-callback" | "dashboard" | "profile" | "organizer" | "admin" | "notifications"
 
 type UserProfile = {
   fullName: string
@@ -25,10 +25,23 @@ type AuthenticationResult =
       accountAlreadyExists: boolean
     }
 
-const verificationResendCooldownSeconds = 60
+type EmailConfirmationState =
+    | { status: "idle" }
+    | { status: "loading" | "success" | "error"; message: string }
 
-function emailConfirmationRedirectTo() {
-  return new URL("/?email_confirmation=1", window.location.origin).toString()
+const verificationResendCooldownSeconds = 60
+const eventifyProductionOrigin = "https://eventify-88548.web.app"
+
+function emailConfirmationRedirectTo(pendingEventId?: string | number) {
+  const redirect = new URL("/", eventifyProductionOrigin)
+
+  redirect.searchParams.set("email_confirmation", "1")
+
+  if (pendingEventId !== undefined && pendingEventId !== null) {
+    redirect.searchParams.set("register_event", String(pendingEventId))
+  }
+
+  return redirect.toString()
 }
 
 function profileInitials(profile: UserProfile | null) {
@@ -225,11 +238,12 @@ type EventRecord = {
   description: string | null
   venue: string
   event_date: string
+  category: string | null
   registration_deadline: string
   organizing_department: string | null
   target_departments: string[]
   capacity: number
-  organizer_id: string
+  organizer_id: string | null
   status: string
   start_time: string | null
   end_time: string | null
@@ -263,6 +277,7 @@ type OrganizerRegistrationRow = {
 type NewEventInput = {
   title: string
   description: string
+  category: string
   venue: string
   eventDate: string
   registrationDeadline: string
@@ -284,6 +299,7 @@ type EventRegistrationCount = {
 const eventFormFields: (keyof NewEventInput)[] = [
   "title",
   "description",
+  "category",
   "venue",
   "eventDate",
   "registrationDeadline",
@@ -382,7 +398,7 @@ function eventFromRecord(record: EventRecord): EventItem {
       : record.event_date,
     time: [startTime, endTime].filter(Boolean).join(" – "),
     location: record.venue,
-    category: "Event",
+    category: record.category || "Event",
     price: "Free",
     seats: record.capacity,
     image: imageUrl || defaultEventImage,
@@ -426,6 +442,7 @@ function eventRecordFromRow(value: unknown): EventRecord {
     description: nullableString("description"),
     venue: requiredString("venue"),
     event_date: requiredString("event_date"),
+    category: row.category === undefined ? null : nullableString("category"),
     registration_deadline: requiredString("registration_deadline"),
     organizing_department: nullableString("organizing_department"),
     target_departments: (() => {
@@ -436,7 +453,9 @@ function eventRecordFromRow(value: unknown): EventRecord {
       return value
     })(),
     capacity: row.capacity,
-    organizer_id: requiredString("organizer_id"),
+    organizer_id: Object.prototype.hasOwnProperty.call(row, "organizer_id")
+      ? nullableString("organizer_id")
+      : null,
     status: requiredString("status"),
     start_time: nullableString("start_time"),
     end_time: nullableString("end_time"),
@@ -762,7 +781,7 @@ function Header({
     setOpen(false)
   }
   const visibleNavItems = navItems.filter(([page]) => {
-    if (page === "dashboard") return profile?.role === "participant"
+    if (page === "dashboard") return profile?.role === "participant" || !profile
     return true
   })
   const profilePage: Page = profile?.role === "organizer"
@@ -825,7 +844,7 @@ function Header({
                   : navigate(page)
               }
             >
-              {label}
+              {page === "dashboard" && !profile ? "Participant Dashboard" : label}
             </button>
           ))}
           <div className="mobile-actions">
@@ -944,6 +963,19 @@ function EventCard({
             </span>
           ) : null}
         </div>
+        {event.description && (
+          <p className="event-card-description">{event.description}</p>
+        )}
+        {(event.organizingDepartment || event.targetDepartments?.length) && (
+          <p className="event-card-departments">
+            {event.organizingDepartment && `Organized by ${event.organizingDepartment}`}
+            {event.organizingDepartment && event.targetDepartments?.length ? " · " : ""}
+            {Boolean(event.targetDepartments?.length) && `For ${event.targetDepartments?.join(", ")}`}
+          </p>
+        )}
+        <p className="event-card-deadline">
+          Registration deadline: {event.registrationDeadline || "Not specified"}
+        </p>
         <div className="card-footer">
           <span className="seats">
             <Icon name="users" size={17} /> {registeredCount} / {event.seats} registered · {fullyBooked
@@ -1021,6 +1053,7 @@ function Home({
   toggleSave,
   continueAs,
   profile,
+  onSearch,
   eventsLoading,
   eventsError,
 }: {
@@ -1031,6 +1064,7 @@ function Home({
   toggleSave: (id: EventItem["id"]) => void
   continueAs: (role: UserRole) => void
   profile: UserProfile | null
+  onSearch: (query: string) => void
   eventsLoading: boolean
   eventsError: string
 }) {
@@ -1040,7 +1074,7 @@ function Home({
   const isOrganizer = profile?.role === "organizer"
   const search = (e: FormEvent) => {
     e.preventDefault()
-    go("explore")
+    onSearch(query.trim())
   }
   return (
     <>
@@ -1416,6 +1450,7 @@ function Explore({
   toggleSave,
   eventsLoading,
   eventsError,
+  initialQuery = "",
 }: {
   go: (page: Page) => void
   eventList: EventItem[]
@@ -1424,24 +1459,38 @@ function Explore({
   toggleSave: (id: EventItem["id"]) => void
   eventsLoading: boolean
   eventsError: string
+  initialQuery?: string
 }) {
-  const [query, setQuery] = useState("")
+  const [query, setQuery] = useState(initialQuery)
+  const [appliedQuery, setAppliedQuery] = useState(initialQuery)
   const [category, setCategory] = useState("All")
+  const [department, setDepartment] = useState("All Departments")
   const [view, setView] = useState<"grid" | "list">("grid")
-  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    setQuery(initialQuery)
+    setAppliedQuery(initialQuery)
+  }, [initialQuery])
+  const categoriesInEvents = [...new Set(eventList.map((event) => event.category).filter(Boolean))]
   const filtered = useMemo(
-    () =>
-      eventList.filter(
-        (event) =>
-          (category === "All" || event.category === category) &&
-          event.title.toLowerCase().includes(query.toLowerCase()),
-      ),
-    [query, category, eventList],
+    () => eventList.filter((event) => {
+      const searchText = [
+        event.title,
+        event.category,
+        event.description || "",
+        event.location,
+        event.organizingDepartment || "",
+        ...(event.targetDepartments || []),
+      ].join(" ").toLowerCase()
+      const matchesDepartment = department === "All Departments" ||
+        !event.targetDepartments?.length ||
+        event.targetDepartments.includes("All Departments") ||
+        event.targetDepartments.includes(department)
+      return (category === "All" || event.category === category) &&
+        matchesDepartment &&
+        searchText.includes(appliedQuery.toLowerCase())
+    }),
+    [appliedQuery, category, department, eventList],
   )
-  const applyFilters = () => {
-    setLoading(true)
-    setTimeout(() => setLoading(false), 700)
-  }
   return (
     <main className="page-main">
       <section className="page-hero">
@@ -1452,15 +1501,18 @@ function Explore({
             From inspiring talks to unforgettable festivals—find where you
             belong.
           </p>
-          <div className="wide-search">
+          <form className="wide-search" onSubmit={(event) => {
+            event.preventDefault()
+            setAppliedQuery(query.trim())
+          }}>
             <Icon name="search" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search events, categories, or venues"
             />
-            <Button onClick={applyFilters}>Search events</Button>
-          </div>
+            <Button type="submit">Search events</Button>
+          </form>
         </div>
       </section>
       <section className="container discovery-layout">
@@ -1470,27 +1522,35 @@ function Explore({
             <button
               onClick={() => {
                 setCategory("All")
+                setDepartment("All Departments")
                 setQuery("")
+                setAppliedQuery("")
               }}
             >
               Clear all
             </button>
           </div>
           <FilterGroup title="Category">
-            {[
-              "All",
-              "Technology",
-              "Hackathon",
-              "Workshop",
-              "Cultural",
-              "Business",
-            ].map((item) => (
+            {["All", ...categoriesInEvents].map((item) => (
               <label className="check-row" key={item}>
                 <input
                   type="radio"
                   name="category"
                   checked={category === item}
                   onChange={() => setCategory(item)}
+                />
+                <span>{item}</span>
+              </label>
+            ))}
+          </FilterGroup>
+          <FilterGroup title="Target department">
+            {["All Departments", ...departmentOptions].map((item) => (
+              <label className="check-row" key={item}>
+                <input
+                  type="radio"
+                  name="target-department"
+                  checked={department === item}
+                  onChange={() => setDepartment(item)}
                 />
                 <span>{item}</span>
               </label>
@@ -1518,9 +1578,6 @@ function Explore({
               </label>
             ))}
           </FilterGroup>
-          <Button className="full-width" onClick={applyFilters}>
-            Apply filters
-          </Button>
         </aside>
         <div className="results">
           <div className="results-bar">
@@ -1552,7 +1609,7 @@ function Explore({
           </div>
           {eventsError ? (
             <div className="error-text" role="alert">{eventsError}</div>
-          ) : loading || eventsLoading ? (
+          ) : eventsLoading ? (
             <div className="skeleton-grid">
               {[1, 2, 3, 4].map((i) => (
                 <div className="skeleton" key={i}>
@@ -1589,7 +1646,9 @@ function Explore({
               <Button
                 onClick={() => {
                   setQuery("")
+                  setAppliedQuery("")
                   setCategory("All")
+                  setDepartment("All Departments")
                 }}
               >
                 Clear filters
@@ -2855,6 +2914,7 @@ function Dashboard({
   registrationsLoading,
   registrationsError,
   onRegister,
+  selectEvent,
 }: {
   go: (page: Page) => void
   onLogout: () => void
@@ -2873,7 +2933,9 @@ function Dashboard({
   registrationsLoading: boolean
   registrationsError: string
   onRegister: (event: EventItem) => Promise<void>
+  selectEvent: (id: EventItem["id"]) => void
 }) {
+  const publicMode = !profile
   const [tab, setTab] = useState(initialTab)
   const [cancelOpen, setCancelOpen] = useState(false)
   useEffect(() => setTab(initialTab), [initialTab])
@@ -2881,7 +2943,12 @@ function Dashboard({
     <main className="dashboard-shell">
       <DashboardSidebar
         title="My Eventify"
-        nav={userNav}
+        nav={publicMode
+          ? [
+              ["dashboard", "grid", "Browse events"],
+              ["explore", "search", "Explore events"],
+            ]
+          : userNav}
         active={tab}
         select={(id) => {
           clearNotificationNavigation()
@@ -2891,6 +2958,7 @@ function Dashboard({
         go={go}
         onLogout={onLogout}
         profile={profile}
+        publicMode={publicMode}
       />
       <div className="dashboard-content">
         <DashboardTop
@@ -2902,6 +2970,7 @@ function Dashboard({
           go={go}
           profile={profile}
           notifications={notifications}
+          publicMode={publicMode}
         />
         <div className="dashboard-inner">
           {tab === "dashboard" && (
@@ -2918,9 +2987,11 @@ function Dashboard({
               registrationsLoading={registrationsLoading}
               registrationsError={registrationsError}
               onRegister={onRegister}
+              selectEvent={selectEvent}
+              publicMode={publicMode}
             />
           )}
-          {tab === "registrations" && (
+          {!publicMode && tab === "registrations" && (
             <Registrations
               registrations={registrations}
               openCancel={() => setCancelOpen(true)}
@@ -2930,7 +3001,7 @@ function Dashboard({
               focusRegistrationId={focusRegistrationId}
             />
           )}
-          {["pending", "approved", "rejected", "tickets"].includes(tab) && (
+          {!publicMode && ["pending", "approved", "rejected", "tickets"].includes(tab) && (
             <Registrations
               registrations={registrations}
               filter={tab}
@@ -2941,12 +3012,12 @@ function Dashboard({
               focusRegistrationId={focusRegistrationId}
             />
           )}
-          {tab === "profile" && (
+          {!publicMode && tab === "profile" && (
             <ProfileSettings profile={profile} onSave={saveProfile} />
           )}
         </div>
       </div>
-      {cancelOpen && (
+      {!publicMode && cancelOpen && (
         <ConfirmModal
           title="Cancel registration?"
           text="Your place will be released and this action cannot be undone."
@@ -2967,6 +3038,7 @@ function DashboardSidebar({
   onLogout,
   admin = false,
   profile = null,
+  publicMode = false,
 }: {
   title: string
   nav: string[][]
@@ -2976,6 +3048,7 @@ function DashboardSidebar({
   onLogout: () => void
   admin?: boolean
   profile?: UserProfile | null
+  publicMode?: boolean
 }) {
   const organizerProfile = title === "Organizer studio"
   return (
@@ -2997,16 +3070,20 @@ function DashboardSidebar({
           </button>
         ))}
       </nav>
-      <button className="sidebar-logout" onClick={onLogout}>
-        <Icon name="logout" size={19} /> Log out
-      </button>
-      <div className="sidebar-profile">
-        <span>{profileInitials(profile)}</span>
-        <div>
-          <strong>{profile?.fullName || profile?.email || "Your account"}</strong>
-          <small>{profile?.email || (organizerProfile ? "Organizer account" : "Participant account")}</small>
-        </div>
-      </div>
+      {!publicMode && (
+        <>
+          <button className="sidebar-logout" onClick={onLogout}>
+            <Icon name="logout" size={19} /> Log out
+          </button>
+          <div className="sidebar-profile">
+            <span>{profileInitials(profile)}</span>
+            <div>
+              <strong>{profile?.fullName || profile?.email || "Your account"}</strong>
+              <small>{profile?.email || (organizerProfile ? "Organizer account" : "Participant account")}</small>
+            </div>
+          </div>
+        </>
+      )}
     </aside>
   )
 }
@@ -3016,11 +3093,13 @@ function DashboardTop({
   go,
   profile = null,
   notifications = 0,
+  publicMode = false,
 }: {
   title: string
   go: (page: Page) => void
   profile?: UserProfile | null
   notifications?: number
+  publicMode?: boolean
 }) {
   return (
     <header className="dashboard-top">
@@ -3029,15 +3108,20 @@ function DashboardTop({
         <p>Sunday, March 29, 2026</p>
       </div>
       <div>
-        <button
+        {publicMode ? (
+          <>
+            <Button variant="ghost" onClick={() => go("login")}>Log in</Button>
+            <Button variant="secondary" onClick={() => go("signup")}>Create account</Button>
+          </>
+        ) : <button
           className="icon-btn notify-btn"
           aria-label={notifications > 0 ? `Notifications, ${notifications} unread` : "Notifications"}
           onClick={() => go("notifications")}
         >
           <Icon name="bell" />
           {notifications > 0 && <span>{notifications}</span>}
-        </button>
-        <span className="dash-avatar">{profileInitials(profile)}</span>
+        </button>}
+        {!publicMode && <span className="dash-avatar">{profileInitials(profile)}</span>}
       </div>
     </header>
   )
@@ -3053,6 +3137,8 @@ function UserOverview({
   registrationsLoading,
   registrationsError,
   onRegister,
+  selectEvent,
+  publicMode = false,
 }: {
   go: (page: Page) => void
   openRegistrations: () => void
@@ -3063,12 +3149,19 @@ function UserOverview({
   registrationsLoading: boolean
   registrationsError: string
   onRegister: (event: EventItem) => Promise<void>
+  selectEvent: (id: EventItem["id"]) => void
+  publicMode?: boolean
 }) {
   const [registeringEventId, setRegisteringEventId] = useState<string | number | null>(null)
   const [registerMessage, setRegisterMessage] = useState("")
   const [registerError, setRegisterError] = useState("")
   const registeredEventIds = new Set(registrations.map((item) => item.eventId))
   const register = async (event: EventItem) => {
+    if (publicMode) {
+      selectEvent(event.id)
+      go("register")
+      return
+    }
     setRegisteringEventId(event.id)
     setRegisterMessage("")
     setRegisterError("")
@@ -3085,19 +3178,29 @@ function UserOverview({
     <>
       <section className="welcome-banner">
         <div>
-          <span className="eyebrow light">Your Eventify account</span>
-          <h2>{registrations.length ? "Your event registrations are here." : "Discover your next campus event."}</h2>
-          <p>{registrations.length ? `${registrations.filter((item) => item.status === "Pending").length} registration(s) pending review.` : "Register for a published event to track its status."}</p>
-          <Button variant="dark" onClick={openRegistrations}>
-            Track approval <Icon name="arrow" size={17} />
-          </Button>
+          <span className="eyebrow light">{publicMode ? "Eventify public events" : "Your Eventify account"}</span>
+          <h2>{publicMode
+            ? "Discover your next campus event."
+            : registrations.length
+              ? "Your event registrations are here."
+              : "Discover your next campus event."}</h2>
+          <p>{publicMode
+            ? "Browse published events. Sign in or create an account when you’re ready to register."
+            : registrations.length
+              ? `${registrations.filter((item) => item.status === "Pending").length} registration(s) pending review.`
+              : "Register for a published event to track its status."}</p>
+          {!publicMode && (
+            <Button variant="dark" onClick={openRegistrations}>
+              Track approval <Icon name="arrow" size={17} />
+            </Button>
+          )}
         </div>
         <div className="welcome-art">
           <span>{publishedEvents.length}</span>
           <small>published events</small>
         </div>
       </section>
-      <div className="stat-grid">
+      {!publicMode && <div className="stat-grid">
         {[
           [String(registrations.length), "Total registrations", "Your registration history"],
           [String(registrations.filter((item) => item.status === "Pending").length), "Pending", "Awaiting organizer review"],
@@ -3125,12 +3228,14 @@ function UserOverview({
             </div>
           </article>
         ))}
-      </div>
+      </div>}
       <section className="dash-section">
         <div className="dash-section-title">
           <div>
-            <h2>Published events</h2>
-            <p>Explore events and register before the deadline.</p>
+            <h2>{publicMode ? "Explore published events" : "Published events"}</h2>
+            <p>{publicMode
+              ? "Event details, audience, and registration deadlines are available to everyone."
+              : "Explore events and register before the deadline."}</p>
           </div>
           <button onClick={() => go("explore")}>
             Explore all <Icon name="arrow" size={16} />
@@ -3139,7 +3244,7 @@ function UserOverview({
         {(eventsError || registerError) && <div className="error-text" role="alert">{eventsError || registerError}</div>}
         {registerMessage && <div className="form-success" role="status">{registerMessage}</div>}
         {eventsLoading && <p>Loading published events…</p>}
-        <div className="dash-event-list">
+        <div className={publicMode ? "dash-event-list public-event-list" : "dash-event-list"}>
           {publishedEvents.map((event) => {
             const isPastDeadline = registrationDeadlinePassed(event.registrationDeadline)
             const availableSeats = Math.max(0, event.seats - (event.registeredCount ?? 0))
@@ -3147,9 +3252,14 @@ function UserOverview({
             <article key={event.id}>
               <EventImage src={event.image} alt="" />
               <div>
-                <h3>{event.title}</h3>
+                {publicMode
+                  ? <button className="public-event-title" onClick={() => {
+                      selectEvent(event.id)
+                      go("details")
+                    }}>{event.title}</button>
+                  : <h3>{event.title}</h3>}
                 <p>{event.description}</p>
-                <p>{event.location} · {event.date}</p>
+                <p>{event.date}{event.time ? ` · ${event.time}` : ""} · {event.location}</p>
                 {(event.organizingDepartment || Boolean(event.targetDepartments?.length)) && (
                   <p>
                     {event.organizingDepartment && `Organized by ${event.organizingDepartment}`}
@@ -3157,37 +3267,58 @@ function UserOverview({
                     {Boolean(event.targetDepartments?.length) && `For ${event.targetDepartments?.join(", ")}`}
                   </p>
                 )}
+                {publicMode && (
+                  <p>Registration deadline: {event.registrationDeadline || "Not specified"}</p>
+                )}
                 <p>
                   Registered: {event.registeredCount ?? 0} / {event.seats} ·
                   Available seats: {availableSeats}
                 </p>
               </div>
-              <Button
-                variant="secondary"
-                onClick={() => void register(event)}
-                disabled={
-                  registeringEventId !== null ||
-                  registeredEventIds.has(String(event.id)) ||
-                  isPastDeadline ||
-                  availableSeats === 0
-                }
-              >
-                {registeredEventIds.has(String(event.id))
-                  ? "Registered"
-                  : availableSeats === 0
-                    ? "Fully Booked"
-                  : isPastDeadline
-                    ? "Registration closed"
-                    : registeringEventId === event.id
-                      ? "Registering…"
-                      : "Register"}
-              </Button>
+              <div className="public-event-actions">
+                {publicMode && (
+                  <Button variant="ghost" onClick={() => {
+                    selectEvent(event.id)
+                    go("details")
+                  }}>
+                    Details
+                  </Button>
+                )}
+                <Button
+                  variant="secondary"
+                  onClick={() => void register(event)}
+                  disabled={
+                    (!publicMode && registeringEventId !== null) ||
+                    registeredEventIds.has(String(event.id)) ||
+                    isPastDeadline ||
+                    availableSeats === 0
+                  }
+                >
+                  {publicMode
+                    ? "Register"
+                    : registeredEventIds.has(String(event.id))
+                      ? "Registered"
+                      : availableSeats === 0
+                        ? "Fully Booked"
+                        : isPastDeadline
+                          ? "Registration closed"
+                          : registeringEventId === event.id
+                            ? "Registering…"
+                            : "Register"}
+                </Button>
+              </div>
             </article>
           )})}
-          {!eventsLoading && !eventsError && publishedEvents.length === 0 && <p>No published events are available right now.</p>}
+          {!eventsLoading && !eventsError && publishedEvents.length === 0 && (
+            <p className="empty-events">
+              {publicMode
+                ? "There are no published events yet. New events will appear here when organizers publish them."
+                : "No published events are available right now."}
+            </p>
+          )}
         </div>
       </section>
-      <section className="dash-section">
+      {!publicMode && <section className="dash-section">
         <div className="dash-section-title">
           <div>
             <h2>Registration history</h2>
@@ -3205,7 +3336,7 @@ function UserOverview({
             <article><div><h3>{registration.event}</h3><p>{registration.eventDate} · {registration.venue}</p></div><StatusBadge status={registration.status} /></article>
           </div>
         ))}
-      </section>
+      </section>}
     </>
   )
 }
@@ -4084,6 +4215,7 @@ function CreateEvent({
     const eventValues: NewEventInput = {
       title: form.title.trim(),
       description: form.description.trim(),
+      category: form.category,
       venue: form.venue.trim(),
       eventDate: form.date,
       registrationDeadline: form.registrationDeadline,
@@ -4097,6 +4229,7 @@ function CreateEvent({
       ? {
           title: editEvent.title,
           description: editEvent.description || "",
+          category: editEvent.category === "Event" ? "" : editEvent.category,
           venue: editEvent.location,
           eventDate: dateInputValue(editEvent.eventDate),
           registrationDeadline: dateInputValue(editEvent.registrationDeadline),
@@ -5489,10 +5622,20 @@ function ConfirmModal({
 }
 
 export default function App() {
-  const [page, setPage] = useState<Page>("login")
+  const [page, setPage] = useState<Page>("home")
   const [profile, setProfile] = useState<UserProfile | null>(null)
+  const [selectedEventId, setSelectedEventId] = useState<EventItem["id"] | null>(null)
+  const selectedEventIdRef = useRef<EventItem["id"] | null>(null)
+  const [eventSearchQuery, setEventSearchQuery] = useState("")
+  const pendingRegistrationEventId = useRef<EventItem["id"] | null>(null)
+  const chooseEvent = (eventId: EventItem["id"]) => {
+    selectedEventIdRef.current = eventId
+    setSelectedEventId(eventId)
+  }
   const [authError, setAuthError] = useState("")
   const [verificationIssue, setVerificationIssue] = useState(false)
+  const [emailConfirmationState, setEmailConfirmationState] =
+    useState<EmailConfirmationState>({ status: "idle" })
   const profileRef = useRef(profile)
   const authSequence = useRef(0)
   const eventImageColumn = useRef<EventImageColumn | null>(null)
@@ -5515,12 +5658,16 @@ export default function App() {
       "The events table has no image or image_url field. Add or identify its existing image field before saving event images.",
     )
   }
-  const eventSelectColumns = async () => {
+  const eventSelectColumns = async (
+    includeOrganizerId = true,
+    includeCategory = true,
+  ) => {
     const imageColumn = await getEventImageColumn()
     return [
       "id",
       "title",
       "description",
+      ...(includeCategory ? ["category"] : []),
       "venue",
       "event_date",
       "organizing_department",
@@ -5529,10 +5676,30 @@ export default function App() {
       "end_time",
       "registration_deadline",
       "capacity",
-      "organizer_id",
       "status",
       imageColumn,
+      ...(includeOrganizerId ? ["organizer_id"] : []),
     ].join(", ")
+  }
+  const loadPublishedEventRows = async () => {
+    const fetchRows = async (includeCategory: boolean) => {
+      const selectColumns = await eventSelectColumns(false, includeCategory)
+      return supabase
+        .from("events")
+        .select(selectColumns)
+        .eq("status", "published")
+        .order("event_date", { ascending: true })
+    }
+
+    let result = await fetchRows(true)
+    if (
+      result.error?.code === "42703" &&
+      /category/i.test(result.error.message)
+    ) {
+      result = await fetchRows(false)
+    }
+    if (result.error) throw result.error
+    return result.data || []
   }
   const fetchProfile = async (userId: string): Promise<UserProfile> => {
     const { data, error } = await supabase
@@ -5573,6 +5740,14 @@ export default function App() {
     }
     return "You do not have organizer access."
   }
+  const destinationAfterAuthentication = (nextProfile: UserProfile): Page => {
+    if (nextProfile.role === "participant" && pendingRegistrationEventId.current !== null) {
+      chooseEvent(pendingRegistrationEventId.current)
+      pendingRegistrationEventId.current = null
+      return "register"
+    }
+    return nextProfile.role === "organizer" ? "organizer" : "dashboard"
+  }
   const getApprovedOrganizerId = async () => {
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
     if (sessionError) throw new Error(`Could not verify your session: ${sessionError.message}`)
@@ -5594,8 +5769,20 @@ export default function App() {
   }
   useEffect(() => {
     let active = true
+    let redirectTimer: number | undefined
     const searchParams = new URLSearchParams(window.location.search)
     const hashParams = new URLSearchParams(window.location.hash.slice(1))
+    const tokenHash =
+      searchParams.get("token_hash") || hashParams.get("token_hash")
+    const callbackType = searchParams.get("type") || hashParams.get("type")
+    const tokenHashCallback = Boolean(tokenHash)
+    const callbackRegistrationEventId =
+      searchParams.get("register_event") || hashParams.get("register_event")
+    if (callbackRegistrationEventId) {
+      pendingRegistrationEventId.current = callbackRegistrationEventId
+      selectedEventIdRef.current = callbackRegistrationEventId
+      setSelectedEventId(callbackRegistrationEventId)
+    }
     const callbackErrorCode =
       searchParams.get("error_code") || hashParams.get("error_code")
     const callbackError =
@@ -5606,13 +5793,17 @@ export default function App() {
     const confirmationCallback =
       !(callbackErrorCode || callbackError) &&
       (searchParams.get("email_confirmation") === "1" ||
-        hashParams.get("type") === "signup")
-    const removeCallbackErrorFromUrl = () => {
+        hashParams.get("type") === "signup" ||
+        (tokenHashCallback && callbackType === "email"))
+    const removeCallbackParamsFromUrl = () => {
       for (const params of [searchParams, hashParams]) {
         params.delete("error")
         params.delete("error_code")
         params.delete("error_description")
         params.delete("email_confirmation")
+        params.delete("register_event")
+        params.delete("token_hash")
+        if (params.get("type") === "email") params.delete("type")
       }
       const query = searchParams.toString()
       const hash = hashParams.toString()
@@ -5631,9 +5822,23 @@ export default function App() {
           ? "This verification link is invalid, expired, or already used. Request a fresh verification email below."
           : `Email verification could not be completed: ${callbackError || callbackErrorCode}. Request a fresh verification email below.`,
       )
-      removeCallbackErrorFromUrl()
+      removeCallbackParamsFromUrl()
+    } else if (tokenHashCallback) {
+      setPage("email-callback")
+      setEmailConfirmationState({
+        status: "loading",
+        message: "Verifying your email address…",
+      })
+      if (callbackType !== "email") {
+        removeCallbackParamsFromUrl()
+        setEmailConfirmationState({
+          status: "error",
+          message: "This verification link is invalid or incomplete. Request a fresh verification email.",
+        })
+      }
     } else if (searchParams.has("email_confirmation")) {
       searchParams.delete("email_confirmation")
+      searchParams.delete("register_event")
       const query = searchParams.toString()
       window.history.replaceState(
         null,
@@ -5659,7 +5864,7 @@ export default function App() {
             setPage("organizer-login")
             setAuthError(organizerAccessMessage(nextProfile))
           } else {
-            setPage(nextProfile.role === "organizer" ? "organizer" : "dashboard")
+            setPage(destinationAfterAuthentication(nextProfile))
           }
         }
       } catch (error) {
@@ -5669,7 +5874,7 @@ export default function App() {
         profileRef.current = null
         setProfile(null)
         setAuthError(message)
-        if (navigate) setPage("login")
+        if (navigate) setPage("home")
       }
     }
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
@@ -5678,13 +5883,14 @@ export default function App() {
         if (active) {
           profileRef.current = null
           setProfile(null)
-          if (event === "SIGNED_OUT") setPage("login")
+          if (event === "SIGNED_OUT") setPage("home")
         }
         return
       }
       if (event === "INITIAL_SESSION") {
-        void restoreProfile(session.user.id, true)
+        void restoreProfile(session.user.id, !tokenHashCallback)
       } else {
+        if (tokenHashCallback) return
         void restoreProfile(
           session.user.id,
           confirmationCallback &&
@@ -5696,7 +5902,7 @@ export default function App() {
     void supabase.auth.getSession().then(({ data, error }) => {
       if (error) throw error
       if (data.session) {
-        return restoreProfile(data.session.user.id, true)
+        return restoreProfile(data.session.user.id, !tokenHashCallback)
       }
       return undefined
     }).catch((error: unknown) => {
@@ -5705,8 +5911,64 @@ export default function App() {
       console.error("Could not restore the Eventify session.", error)
       setAuthError(message)
     })
+    if (tokenHashCallback && callbackType === "email" && tokenHash) {
+      void (async () => {
+        try {
+          const { data, error } = await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: "email",
+          })
+          if (error) throw new Error(error.message)
+          if (!data.session || !data.user) {
+            throw new Error("Email verification did not establish a session. Request a fresh verification email.")
+          }
+          removeCallbackParamsFromUrl()
+          const nextProfile = await fetchProfile(data.user.id)
+          if (!active) return
+          profileRef.current = nextProfile
+          setProfile(nextProfile)
+          setNotificationNavigation(null)
+          setVerificationIssue(false)
+          const needsOrganizerApproval =
+            nextProfile.role === "organizer" &&
+            nextProfile.organizerStatus !== "approved"
+          const successMessage = needsOrganizerApproval
+            ? `Email confirmed. ${organizerAccessMessage(nextProfile)}`
+            : `Email confirmed. Taking you to your ${nextProfile.role === "organizer" ? "organizer" : "participant"} dashboard.`
+          setEmailConfirmationState({
+            status: "success",
+            message: successMessage,
+          })
+          redirectTimer = window.setTimeout(() => {
+            if (!active) return
+            if (needsOrganizerApproval) {
+              setPage("organizer-login")
+              setAuthError(organizerAccessMessage(nextProfile))
+            } else {
+              setPage(destinationAfterAuthentication(nextProfile))
+            }
+            setEmailConfirmationState({ status: "idle" })
+            window.scrollTo({ top: 0, behavior: "smooth" })
+          }, 1200)
+        } catch (verificationError) {
+          if (!active) return
+          removeCallbackParamsFromUrl()
+          const message = verificationError instanceof Error
+            ? verificationError.message
+            : "Email verification could not be completed."
+          console.error("Email confirmation failed.", verificationError)
+          setEmailConfirmationState({
+            status: "error",
+            message: /expired|invalid|already used|otp_disabled/i.test(message)
+              ? "This verification link is invalid, expired, or already used. Request a fresh verification email."
+              : `Email verification could not be completed: ${message}`,
+          })
+        }
+      })()
+    }
     return () => {
       active = false
+      if (redirectTimer !== undefined) window.clearTimeout(redirectTimer)
       authSequence.current += 1
       authListener.subscription.unsubscribe()
     }
@@ -5759,11 +6021,10 @@ export default function App() {
       )
     })
   }
-  const [selectedEventId, setSelectedEventId] = useState<EventItem["id"] | null>(null)
   const selectedEvent =
     eventList.find((event) => event.id === selectedEventId) ||
     ownEvents.find((event) => event.id === selectedEventId) ||
-    eventList[0]
+    (selectedEventId === null ? eventList[0] : undefined)
   const [participantRegistrations, setParticipantRegistrations] = useState<RegistrationRecord[]>([])
   const [participantRegistrationsLoading, setParticipantRegistrationsLoading] = useState(false)
   const [participantRegistrationsError, setParticipantRegistrationsError] = useState("")
@@ -5870,15 +6131,10 @@ export default function App() {
       setPublishedEventsError("")
       setPublishedEvents([])
       try {
-        const selectColumns = await eventSelectColumns()
-        const { data, error } = await supabase
-          .from("events")
-          .select(selectColumns)
-          .eq("status", "published")
-          .order("event_date", { ascending: true })
-        if (error) throw error
         const events = await loadEventRegistrationCounts(
-          (data || []).map((record) => eventFromRecord(eventRecordFromRow(record))),
+          (await loadPublishedEventRows()).map((record) =>
+            eventFromRecord(eventRecordFromRow(record)),
+          ),
         )
         if (active) setPublishedEvents(events)
       } catch (error) {
@@ -5904,7 +6160,7 @@ export default function App() {
       setOrganizerRegistrations([])
       try {
         const organizerId = await getApprovedOrganizerId()
-        const selectColumns = await eventSelectColumns()
+        const selectColumns = await eventSelectColumns(false)
         const { data, error } = await supabase
           .from("events")
           .select(selectColumns)
@@ -5943,26 +6199,13 @@ export default function App() {
   }, [page, profile])
     // Realtime synchronization for events across all devices
   useEffect(() => {
-    if (!profile) return
-
     let active = true
 
     const refreshEvents = async () => {
       try {
-        const selectColumns = await eventSelectColumns()
-
         // Refresh all published events for participants
-        const { data: publishedData, error: publishedError } =
-          await supabase
-            .from("events")
-            .select(selectColumns)
-            .eq("status", "published")
-            .order("event_date", { ascending: true })
-
-        if (publishedError) throw publishedError
-
         const published = await loadEventRegistrationCounts(
-          (publishedData || []).map((record) =>
+          (await loadPublishedEventRows()).map((record) =>
             eventFromRecord(eventRecordFromRow(record))
           )
         )
@@ -5973,9 +6216,10 @@ export default function App() {
         }
 
         // Refresh the organizer's own events
-        if (profile.role === "organizer" && isApprovedOrganizer(profile)) {
+        if (profile?.role === "organizer" && isApprovedOrganizer(profile)) {
           const organizerId = await getApprovedOrganizerId()
 
+          const selectColumns = await eventSelectColumns(false)
           const { data: ownData, error: ownError } = await supabase
             .from("events")
             .select(selectColumns)
@@ -6121,7 +6365,7 @@ export default function App() {
         const { data: eventRecords, error: eventsError } = eventIds.length
           ? await supabase
               .from("events")
-              .select("id, title, description, venue, event_date, organizing_department, target_departments, start_time, end_time, registration_deadline, capacity, organizer_id, status")
+              .select("id, title, description, category, venue, event_date, organizing_department, target_departments, start_time, end_time, registration_deadline, capacity, status")
               .in("id", eventIds)
           : { data: [], error: null }
         if (eventsError) throw eventsError
@@ -6214,7 +6458,7 @@ export default function App() {
         email: normalizedEmail,
         password,
         options: {
-          emailRedirectTo: emailConfirmationRedirectTo(),
+          emailRedirectTo: emailConfirmationRedirectTo(pendingRegistrationEventId.current ?? undefined),
           data: {
             account_type: role,
             full_name: details.fullName?.trim() || "",
@@ -6242,7 +6486,7 @@ export default function App() {
         setPage("organizer-login")
         setAuthError(organizerAccessMessage(nextProfile))
       } else {
-        setPage(nextProfile.role === "organizer" ? "organizer" : "dashboard")
+        setPage(destinationAfterAuthentication(nextProfile))
       }
       window.scrollTo({ top: 0, behavior: "smooth" })
       return { status: "authenticated" }
@@ -6295,7 +6539,7 @@ export default function App() {
     setProfile(nextProfile)
     setAuthError("")
     setVerificationIssue(false)
-    setPage(nextProfile.role === "organizer" ? "organizer" : "dashboard")
+    setPage(destinationAfterAuthentication(nextProfile))
     window.scrollTo({ top: 0, behavior: "smooth" })
     return { status: "authenticated" }
   }
@@ -6307,7 +6551,11 @@ export default function App() {
     const { error } = await supabase.auth.resend({
       type: "signup",
       email: normalizedEmail,
-      options: { emailRedirectTo: emailConfirmationRedirectTo() },
+      options: {
+        emailRedirectTo: emailConfirmationRedirectTo(
+          pendingRegistrationEventId.current ?? undefined,
+        ),
+      },
     })
     if (error) {
       if (/rate limit|too many requests/i.test(error.message)) {
@@ -6338,7 +6586,7 @@ export default function App() {
     profileRef.current = null
     setProfile(null)
     setNotificationNavigation(null)
-    setPage("login")
+    setPage("home")
     setAuthError("")
   }
   const go = (next: Page) => {
@@ -6348,10 +6596,16 @@ export default function App() {
     if (next === "organizer" && !isApprovedOrganizer(currentProfile)) {
       destination = "organizer-login"
       if (currentProfile) setAuthError(organizerAccessMessage(currentProfile))
+    } else if (next === "register" && !currentProfile) {
+      pendingRegistrationEventId.current ??= selectedEventIdRef.current ?? selectedEventId
+      destination = "login"
+    } else if (next === "register" && currentProfile?.role !== "participant") {
+      destination = "participant-login"
     } else if (next === "profile" && currentProfile?.role !== "participant") {
       destination = "participant-login"
     } else if (
       next === "dashboard" &&
+      currentProfile &&
       currentProfile?.role !== "participant" &&
       !isApprovedOrganizer(currentProfile)
     ) {
@@ -6487,7 +6741,8 @@ export default function App() {
       setPage("participant-login")
     } else if (
       page === "dashboard" &&
-      profile?.role !== "participant" &&
+      profile &&
+      profile.role !== "participant" &&
       !isApprovedOrganizer(profile)
     ) {
       setPage("participant-login")
@@ -6554,6 +6809,7 @@ export default function App() {
       const eventValuesByColumn: Record<string, unknown> = {
         title: event.title,
         description: event.description,
+        category: event.category,
         venue: event.venue,
         event_date: event.eventDate,
         organizing_department: event.organizingDepartment || null,
@@ -6566,6 +6822,7 @@ export default function App() {
       const fieldColumns: Record<keyof NewEventInput, string> = {
         title: "title",
         description: "description",
+        category: "category",
         venue: "venue",
         eventDate: "event_date",
         registrationDeadline: "registration_deadline",
@@ -6690,7 +6947,8 @@ export default function App() {
     page === "organizer-login" ||
     page === "signup" ||
     page === "organizer-signup" ||
-    page === "participant-signup"
+    page === "participant-signup" ||
+    page === "email-callback"
   const getParticipantId = async () => {
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
     if (sessionError) throw new Error(`Could not verify your session: ${sessionError.message}`)
@@ -6748,6 +7006,7 @@ export default function App() {
       id: event.id,
       title: event.title,
       description: event.description || null,
+      category: event.category || null,
       venue: event.location,
       event_date: event.eventDate || "",
       organizing_department: event.organizingDepartment || null,
@@ -6830,10 +7089,14 @@ export default function App() {
         <Home
           go={go}
           eventList={eventList}
-          selectEvent={setSelectedEventId}
+          selectEvent={chooseEvent}
           saved={saved}
           toggleSave={toggleSave}
           profile={profile}
+          onSearch={(query) => {
+            setEventSearchQuery(query)
+            go("explore")
+          }}
           eventsLoading={publishedEventsLoading}
           eventsError={publishedEventsError}
           continueAs={(role) => go(role === "organizer" ? "organizer" : "dashboard")}
@@ -6843,11 +7106,12 @@ export default function App() {
         <Explore
           go={go}
           eventList={eventList}
-          selectEvent={setSelectedEventId}
+          selectEvent={chooseEvent}
           saved={saved}
           toggleSave={toggleSave}
           eventsLoading={publishedEventsLoading}
           eventsError={publishedEventsError}
+          initialQuery={eventSearchQuery}
         />
       )}
       {page === "details" && selectedEvent && (
@@ -6867,7 +7131,7 @@ export default function App() {
           registrationError={
             profile?.role === "participant" ? participantRegistrationsError : ""
           }
-          selectEvent={setSelectedEventId}
+          selectEvent={chooseEvent}
           saved={saved}
           toggleSave={toggleSave}
         />
@@ -6919,6 +7183,43 @@ export default function App() {
           role="participant"
         />
       )}
+      {page === "email-callback" && (
+        <main className="registration-page">
+          <div className="container narrow-container">
+            <section className="empty-state email-confirmation-state">
+              <span className="eyebrow">Eventify account</span>
+              <h1>
+                {emailConfirmationState.status === "loading"
+                  ? "Confirming your email"
+                  : emailConfirmationState.status === "success"
+                    ? "Email confirmed"
+                    : "Email confirmation failed"}
+              </h1>
+              {emailConfirmationState.status === "loading" && (
+                <p role="status">{emailConfirmationState.message}</p>
+              )}
+              {emailConfirmationState.status === "success" && (
+                <p className="form-success" role="status">
+                  {emailConfirmationState.message}
+                </p>
+              )}
+              {emailConfirmationState.status === "error" && (
+                <>
+                  <p className="error-text" role="alert">
+                    {emailConfirmationState.message}
+                  </p>
+                  <Button onClick={() => {
+                    setEmailConfirmationState({ status: "idle" })
+                    go("login")
+                  }}>
+                    Continue to login
+                  </Button>
+                </>
+              )}
+            </section>
+          </div>
+        </main>
+      )}
       {(page === "register" ||
         page === "review" ||
         page === "confirmation") && selectedEvent && (
@@ -6941,7 +7242,7 @@ export default function App() {
         </main>
       )}
       {(page === "dashboard" || page === "profile") &&
-        (profile?.role === "participant" || (page === "dashboard" && isApprovedOrganizer(profile))) && (
+        (!profile || profile.role === "participant" || (page === "dashboard" && isApprovedOrganizer(profile))) && (
         <Dashboard
           go={go}
           onLogout={logout}
@@ -6960,6 +7261,7 @@ export default function App() {
           registrationsLoading={participantRegistrationsLoading}
           registrationsError={participantRegistrationsError}
           onRegister={async (event) => { await registerForEvent(event) }}
+          selectEvent={chooseEvent}
         />
       )}
       {page === "organizer" && isApprovedOrganizer(profile) && (
@@ -6975,7 +7277,7 @@ export default function App() {
           updateRegistration={updateRegistration}
           profile={profile}
           saveProfile={saveProfile}
-          selectEvent={setSelectedEventId}
+          selectEvent={chooseEvent}
           onPublishEvent={publishEvent}
           onPublishDraft={(event) => updateEventStatus(event, "published")}
           onCompleteEvent={(event) => updateEventStatus(event, "completed")}

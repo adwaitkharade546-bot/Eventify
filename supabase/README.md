@@ -26,8 +26,8 @@ Configure the hosted project manually in Supabase Dashboard:
 
 1. Under **Authentication > Providers > Email**, keep Email provider enabled and turn **Confirm email** on.
 2. Under **Authentication > SMTP Settings**, enable custom SMTP and set host `smtp-relay.brevo.com`, port `465`, and secure/TLS connection enabled. Use the Brevo SMTP login as the username and the Brevo SMTP key (not the API key) as the password. Set the sender email to an address verified in Brevo and the sender name to `Eventify`.
-3. Under **Authentication > URL Configuration**, set the Site URL to the deployed Eventify origin. Add the exact redirect URLs for each deployed environment, including `https://your-eventify-host/` and `https://your-eventify-host/?email_confirmation=1`; add the corresponding local development URLs while testing. Signup and resend construct the redirect from `window.location.origin`.
-4. Under **Authentication > Email Templates > Confirm signup**, use the Eventify HTML in `templates/confirmation.html`. The link/button must use `{{ .ConfirmationURL }}`. Paste the template into the Dashboard because changes to the local template are not automatically pushed to hosted Auth.
+3. Under **Authentication > URL Configuration**, set the production Site URL to `https://eventify-88548.web.app`. Add `https://eventify-88548.web.app/**` to **Redirect URLs** (and the exact root URL `https://eventify-88548.web.app/` if desired). Signup and verification resend both use this production origin, including the optional `register_event` query parameter. Add local development URLs only if you separately test local signup.
+4. Under **Authentication > Email Templates > Confirm signup**, paste the updated `templates/confirmation.html` into the Dashboard. Its confirmation link must use `{{ .RedirectTo }}&amp;token_hash={{ .TokenHash }}&amp;type=email`; do not use `{{ .ConfirmationURL }}` for this flow. The redirect URL carries signup context (including the intended registration event) while the hashed token is verified by the app, so a different device does not need the original browser's PKCE verifier. Template file changes are not automatically pushed to hosted Auth.
 
 Brevo's `Delivered` status generally means the recipient mail server accepted the message; it does not guarantee inbox placement. Check Gmail Spam, Promotions, All Mail, filters, blocked senders, and the exact recipient address. Also check Brevo event details and sender/domain authentication (SPF/DKIM) if messages are filtered. The `BREVO_*` Edge Function secrets below are for registration notifications and do not configure Supabase Auth SMTP.
 
@@ -42,6 +42,14 @@ Before deploying the frontend changes, apply `migrations/20261105150000_add_even
 Before deploying the frontend changes, review and run `migrations/20261107010000_add_event_departments.sql` in the intended Supabase project. It adds `organizing_department` and `target_departments` to the existing `public.events` table without recreating it. Existing events retain a null organizing department and receive an empty target-department array. The migration checks for incompatible columns and makes no RLS policy changes; event visibility and edit access continue to use the existing `events` policies.
 
 The organizer event form saves one organizing department and any number of target departments. “All Departments” is exclusive of individual departments. Participants see the saved values on event cards and the event details page. Both fields may be left blank for older or unspecified events.
+
+## Public event browsing
+
+Before deploying the public-browsing frontend, apply `migrations/20261107020000_public_event_browsing.sql` after the event-times, event-departments, and event-people migrations. It adds an optional `category` column to the existing `events` table, grants anonymous users column-level read access only to public event details, and adds anonymous SELECT policies that allow published events only. A restrictive policy caps any other permissive anonymous event policy to published rows. It does not change authenticated event policies. It also adds `events` to the existing Realtime publication and updates the known `event_people` read policy to preserve published-event and approved-owner access without granting anonymous users access to organizer IDs.
+
+The migration intentionally stops if events RLS is disabled, if the expected `event_people` policy is missing, or if `PUBLIC` has broad/private-column event read grants. Inspect and resolve those live-schema conditions without weakening existing authenticated policies before retrying. It does not grant anonymous access to profiles, registrations, or organizer identifiers.
+
+New event categories are saved in `events.category` and power the Explore category filter. Existing events with no category remain visible under the generic “Event” category.
 
 ## Event mentors and speakers
 
