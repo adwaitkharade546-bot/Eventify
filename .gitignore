@@ -1,30 +1,9 @@
-node_modules/
-dist/
-build/
-.cache/
-.env*
-.vite/
-vite.config.*.timestamp-*
-*.tsbuildinfo
-*-debug.log*
-logs/
-*.log
-.claude-replay.*
-.tmp-*
-/.figma/design-context/
-
-# Platform-managed agentplat state, not project source. In the
-# client-initiated single-repo workspace layout (make's `Path: "."` spec) the
-# repo root IS the workspace root, so these land inside this repo rather than
-# beside it.
-/.plugins/
-/.opencode-skills/
-
 # Dependencies
 node_modules/
 
 # Build output
 dist/
+build/
 
 # Environment variables and secrets
 .env
@@ -34,14 +13,36 @@ dist/
 # Firebase local cache
 .firebase/
 
+# Supabase temporary files
+supabase/.temp/
+
 # Logs
+*.log
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
+logs/
+
+# Vite and TypeScript cache
+.vite/
+*.tsbuildinfo
+vite.config.*.timestamp-*
+
+# Temporary files
+.cache/
+.tmp-*
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Supabase local temporary files
-supabase/.temp/
+# Editor files
+.vscode/
+.idea/
+
+# Agent/plugin local configuration
+.plugins/
+.opencode-skills/
+
+# Figma local context
+/.figma/design-context/
