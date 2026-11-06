@@ -37,6 +37,12 @@ The app uses the existing lowercase event statuses `draft`, `published`, `comple
 
 Before deploying the frontend changes, apply `migrations/20261105150000_add_event_times.sql` to the existing database. It only adds nullable `start_time` and `end_time` columns to `public.events`, preserving all existing events and registrations. Existing rows remain valid with no times recorded; new and edited event times are stored in those columns.
 
+## Event departments
+
+Before deploying the frontend changes, review and run `migrations/20261107010000_add_event_departments.sql` in the intended Supabase project. It adds `organizing_department` and `target_departments` to the existing `public.events` table without recreating it. Existing events retain a null organizing department and receive an empty target-department array. The migration checks for incompatible columns and makes no RLS policy changes; event visibility and edit access continue to use the existing `events` policies.
+
+The organizer event form saves one organizing department and any number of target departments. “All Departments” is exclusive of individual departments. Participants see the saved values on event cards and the event details page. Both fields may be left blank for older or unspecified events.
+
 ## Event mentors and speakers
 
 Before deploying the frontend changes, review and run `migrations/20261106090000_create_event_people.sql` in the intended project's Supabase SQL Editor. The migration derives `event_people.event_id` from the existing `events.id` column type, adds a foreign key with cascading cleanup when an event is deleted, and creates the `event_people` table with role validation and display ordering. It stops before making changes if `public.events` or `public.profiles` is missing, or if an `event_people` table already exists; inspect any existing table rather than dropping or replacing it.
@@ -150,3 +156,39 @@ The live database and bucket settings were not inspectable from this workspace, 
 - A notification is considered sent after Brevo accepts the SMTP message. SMTP cannot guarantee exactly-once delivery: if a process fails after SMTP acceptance but before the sent state is saved, the message may be retried. The outbox prevents duplicate queue rows and concurrent sends, and uses a deterministic `Message-ID`, but that ID is not a provider idempotency guarantee.
 - Check the outbox through the Supabase SQL Editor when diagnosing delivery. Rows that exhaust all attempts have `status = 'failed'` and a `last_error`; repair configuration and manually requeue only after confirming whether the message was accepted by Brevo.
 - The notification worker uses database tables and columns named in the migration compatibility check. If the live database differs, do not run the migration until it has been reviewed and adapted to the actual schema.
+
+## In-app notifications
+
+The notifications page reads and writes `public.notifications`; it has no demonstration rows or browser-only notification state. `migrations/20261107000000_in_app_notifications.sql` creates the notification table, user-scoped RLS policies and grants, registration/event database triggers, and a scheduled-reminder function. It leaves the existing registration email outbox, event/registration permissions, and authentication setup unchanged. It checks the existing event schema and stops rather than replacing an existing `public.notifications` table.
+
+Review the migration against the live database, then execute it in the Supabase SQL Editor (or apply it through the project's migration workflow). It requires the existing event `start_time` and `end_time` columns from `20261105150000_add_event_times.sql`; for text event dates and deadlines, values must use ISO `YYYY-MM-DD` form. The migration adds `notifications` to `supabase_realtime` and does not backfill old actions as if they were new.
+
+### Schedule event and deadline reminders
+
+The reminder function only targets registered participants with `pending` or `approved` registrations for published events. It uses the event date, `start_time`, and registration deadline in Supabase; unique keys prevent repeated reminders for the same event time/deadline. No frontend timer or new Edge Function is used.
+
+After applying the migration, enable `pg_cron` under **Database > Extensions** if it is not already enabled, then run this once in the SQL Editor to replace any existing job with the same name and schedule a 15-minute reminder check:
+
+```sql
+DO $$
+DECLARE
+  existing_job record;
+BEGIN
+  FOR existing_job IN
+    SELECT jobid FROM cron.job WHERE jobname = 'eventify-in-app-notification-scheduler'
+  LOOP
+    PERFORM cron.unschedule(existing_job.jobid);
+  END LOOP;
+
+  PERFORM cron.schedule(
+    'eventify-in-app-notification-scheduler',
+    '*/15 * * * *',
+    'SELECT public.process_eventify_scheduled_notifications();'
+  );
+END
+$$;
+```
+
+Verify the job in **Database > Cron Jobs** and confirm rows are created in `public.notifications` for a test event with a registered participant and an event start/deadline within 24 hours. Event dates and times have no timezone column in the current schema; the reminder function interprets them in the database session timezone. Configure the Supabase database timezone to match the events' local timezone before relying on scheduled reminders. A project with events in multiple time zones needs an explicit event timezone field before those reminders can be exact.
+
+The in-app triggers create registration success, organizer new-registration, approval/rejection and registration-activity, event detail update, cancellation, completion, publication activity, and scheduled reminder notifications. The frontend only permits each signed-in user to read, update the read flag on, or delete their own notification. Inserts are made by trusted database triggers, not the browser.

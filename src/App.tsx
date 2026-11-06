@@ -59,6 +59,39 @@ type RegistrationRecord = {
   status: RegistrationStatus
 }
 
+type NotificationType =
+  | "registration_success"
+  | "registration_approved"
+  | "registration_rejected"
+  | "event_reminder"
+  | "event_updated"
+  | "event_cancelled"
+  | "registration_deadline"
+  | "event_completed"
+  | "new_registration"
+  | "registration_activity"
+  | "event_activity"
+
+type NotificationRecord = {
+  id: string
+  user_id: string
+  event_id: string | null
+  registration_id: string | null
+  event_title: string
+  title: string
+  message: string
+  type: NotificationType
+  is_read: boolean
+  created_at: string
+  updated_at: string
+}
+
+type NotificationNavigation = {
+  tab: string
+  registrationId: string | null
+  eventId: string | null
+}
+
 type EventItem = {
   id: number | string
   title: string
@@ -77,6 +110,8 @@ type EventItem = {
   ownerEmail?: string
   eventDate?: string
   registrationDeadline?: string
+  organizingDepartment?: string
+  targetDepartments?: string[]
   startTimeValue?: string
   endTimeValue?: string
   people?: EventPerson[]
@@ -191,6 +226,8 @@ type EventRecord = {
   venue: string
   event_date: string
   registration_deadline: string
+  organizing_department: string | null
+  target_departments: string[]
   capacity: number
   organizer_id: string
   status: string
@@ -229,6 +266,8 @@ type NewEventInput = {
   venue: string
   eventDate: string
   registrationDeadline: string
+  organizingDepartment: string
+  targetDepartments: string[]
   capacity: number
   startTime: string
   endTime: string
@@ -248,10 +287,29 @@ const eventFormFields: (keyof NewEventInput)[] = [
   "venue",
   "eventDate",
   "registrationDeadline",
+  "organizingDepartment",
+  "targetDepartments",
   "capacity",
   "startTime",
   "endTime",
 ]
+
+const departmentOptions = [
+  "Computer Science",
+  "Information Technology",
+  "Artificial Intelligence and Data Science",
+  "Electronics and Telecommunication",
+  "Mechanical Engineering",
+  "Civil Engineering",
+  "Electrical Engineering",
+  "Commerce",
+  "Management Studies",
+  "Science",
+  "Arts",
+  "Other",
+] as const
+
+const targetDepartmentOptions = ["All Departments", ...departmentOptions] as const
 
 type EventImageColumn = "image" | "image_url"
 
@@ -333,6 +391,8 @@ function eventFromRecord(record: EventRecord): EventItem {
     description: record.description || "",
     eventDate,
     registrationDeadline: dateInputValue(record.registration_deadline),
+    organizingDepartment: record.organizing_department || "",
+    targetDepartments: record.target_departments || [],
     startTimeValue,
     endTimeValue,
   }
@@ -367,6 +427,14 @@ function eventRecordFromRow(value: unknown): EventRecord {
     venue: requiredString("venue"),
     event_date: requiredString("event_date"),
     registration_deadline: requiredString("registration_deadline"),
+    organizing_department: nullableString("organizing_department"),
+    target_departments: (() => {
+      const value = row.target_departments
+      if (!Array.isArray(value) || value.some((department) => typeof department !== "string")) {
+        throw new Error("Supabase returned invalid event target departments.")
+      }
+      return value
+    })(),
     capacity: row.capacity,
     organizer_id: requiredString("organizer_id"),
     status: requiredString("status"),
@@ -772,7 +840,7 @@ function Header({
         <div className="nav-actions">
           <button
             className="icon-btn notify-btn"
-            aria-label="Notifications"
+            aria-label={notifications > 0 ? `Notifications, ${notifications} unread` : "Notifications"}
             onClick={() => go("notifications")}
           >
             <Icon name="bell" />
@@ -865,6 +933,16 @@ function EventCard({
           <span>
             <Icon name="pin" size={16} /> {event.location}
           </span>
+          {event.organizingDepartment && (
+            <span>
+              Organized by {event.organizingDepartment}
+            </span>
+          )}
+          {event.targetDepartments?.length ? (
+            <span>
+              For {event.targetDepartments.join(", ")}
+            </span>
+          ) : null}
         </div>
         <div className="card-footer">
           <span className="seats">
@@ -1245,6 +1323,13 @@ function Home({
                     <Icon name="clock" size={16} /> {event.time} <b>·</b>{" "}
                     <Icon name="pin" size={16} /> {event.location}
                   </p>
+                  {(event.organizingDepartment || event.targetDepartments?.length) && (
+                    <p className="upcoming-departments">
+                      {event.organizingDepartment && `Organized by ${event.organizingDepartment}`}
+                      {event.organizingDepartment && event.targetDepartments?.length ? " · " : ""}
+                      {Boolean(event.targetDepartments?.length) && `For ${event.targetDepartments?.join(", ")}`}
+                    </p>
+                  )}
                 </div>
                 <strong className="upcoming-price">{event.price}</strong>
                 <span className="round-arrow">
@@ -1658,6 +1743,12 @@ function Details({
             <Fact icon="calendar" label="Date" value={event.date} />
             <Fact icon="clock" label="Time" value={event.time} />
             <Fact icon="pin" label="Venue" value={event.location} />
+            {event.organizingDepartment && (
+              <Fact icon="users" label="Organizing department / faculty" value={event.organizingDepartment} />
+            )}
+            {event.targetDepartments?.length ? (
+              <Fact icon="users" label="Event for" value={event.targetDepartments.join(", ")} />
+            ) : null}
           </div>
           <DetailSection title="About this event">
             <p>
@@ -1666,41 +1757,6 @@ function Details({
             <p>
               Register to reserve your place and receive updates from the organizer.
             </p>
-          </DetailSection>
-          <DetailSection title="Event agenda">
-            <div className="timeline">
-              {[
-                [
-                  "09:00 AM",
-                  "Opening & team formation",
-                  "Welcome address, challenge reveal, and team matching.",
-                ],
-                [
-                  "11:00 AM",
-                  "Building begins",
-                  "Mentor rooms and technical support open.",
-                ],
-                [
-                  "07:00 PM",
-                  "Founder fireside chat",
-                  "Ideas, resilience, and building for real users.",
-                ],
-                [
-                  "Next day · 03:00 PM",
-                  "Final demos & awards",
-                  "Top teams pitch to our judging panel.",
-                ],
-              ].map(([time, title, text], index) => (
-                <div key={title}>
-                  <span>{index + 1}</span>
-                  <time>{time}</time>
-                  <div>
-                    <h4>{title}</h4>
-                    <p>{text}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
           </DetailSection>
           {peopleLoading && <p className="detail-people-state" role="status">Loading mentors and speakers…</p>}
           {peopleError && <p className="error-text" role="alert">{peopleError}</p>}
@@ -2785,6 +2841,9 @@ function Dashboard({
   go,
   onLogout,
   initialTab = "dashboard",
+  focusRegistrationId = null,
+  notifications = 0,
+  clearNotificationNavigation,
   saved,
   toggleSave,
   registrations,
@@ -2800,6 +2859,9 @@ function Dashboard({
   go: (page: Page) => void
   onLogout: () => void
   initialTab?: string
+  focusRegistrationId?: string | null
+  notifications?: number
+  clearNotificationNavigation: () => void
   saved: EventItem["id"][]
   toggleSave: (id: EventItem["id"]) => void
   registrations: RegistrationRecord[]
@@ -2821,7 +2883,11 @@ function Dashboard({
         title="My Eventify"
         nav={userNav}
         active={tab}
-        select={(id) => (id === "explore" ? go("explore") : setTab(id))}
+        select={(id) => {
+          clearNotificationNavigation()
+          if (id === "explore") go("explore")
+          else setTab(id)
+        }}
         go={go}
         onLogout={onLogout}
         profile={profile}
@@ -2835,12 +2901,16 @@ function Dashboard({
           }
           go={go}
           profile={profile}
+          notifications={notifications}
         />
         <div className="dashboard-inner">
           {tab === "dashboard" && (
             <UserOverview
               go={go}
-              openRegistrations={() => setTab("registrations")}
+              openRegistrations={() => {
+                clearNotificationNavigation()
+                setTab("registrations")
+              }}
               publishedEvents={publishedEvents}
               registrations={registrations}
               eventsLoading={eventsLoading}
@@ -2857,6 +2927,7 @@ function Dashboard({
               go={go}
               loading={registrationsLoading}
               error={registrationsError}
+              focusRegistrationId={focusRegistrationId}
             />
           )}
           {["pending", "approved", "rejected", "tickets"].includes(tab) && (
@@ -2867,6 +2938,7 @@ function Dashboard({
               go={go}
               loading={registrationsLoading}
               error={registrationsError}
+              focusRegistrationId={focusRegistrationId}
             />
           )}
           {tab === "profile" && (
@@ -2943,10 +3015,12 @@ function DashboardTop({
   title,
   go,
   profile = null,
+  notifications = 0,
 }: {
   title: string
   go: (page: Page) => void
   profile?: UserProfile | null
+  notifications?: number
 }) {
   return (
     <header className="dashboard-top">
@@ -2955,8 +3029,13 @@ function DashboardTop({
         <p>Sunday, March 29, 2026</p>
       </div>
       <div>
-        <button className="icon-btn" onClick={() => go("notifications")}>
+        <button
+          className="icon-btn notify-btn"
+          aria-label={notifications > 0 ? `Notifications, ${notifications} unread` : "Notifications"}
+          onClick={() => go("notifications")}
+        >
           <Icon name="bell" />
+          {notifications > 0 && <span>{notifications}</span>}
         </button>
         <span className="dash-avatar">{profileInitials(profile)}</span>
       </div>
@@ -3071,6 +3150,13 @@ function UserOverview({
                 <h3>{event.title}</h3>
                 <p>{event.description}</p>
                 <p>{event.location} · {event.date}</p>
+                {(event.organizingDepartment || Boolean(event.targetDepartments?.length)) && (
+                  <p>
+                    {event.organizingDepartment && `Organized by ${event.organizingDepartment}`}
+                    {event.organizingDepartment && event.targetDepartments?.length ? " · " : ""}
+                    {Boolean(event.targetDepartments?.length) && `For ${event.targetDepartments?.join(", ")}`}
+                  </p>
+                )}
                 <p>
                   Registered: {event.registeredCount ?? 0} / {event.seats} ·
                   Available seats: {availableSeats}
@@ -3241,6 +3327,7 @@ function Registrations({
   filter = "all",
   loading,
   error,
+  focusRegistrationId = null,
 }: {
   openCancel: () => void;
   go: (page: Page) => void;
@@ -3248,10 +3335,12 @@ function Registrations({
   loading: boolean;
   error: string;
   filter?: string;
+  focusRegistrationId?: string | null;
 }) {
   const [editing, setEditing] = useState<RegistrationRecord | null>(null);
 
   const visible = registrations.filter((record) => {
+    if (focusRegistrationId && record.id !== focusRegistrationId) return false
     if (filter === "pending") return record.status === "Pending";
     if (filter === "approved" || filter === "tickets") {
       return record.status === "Approved";
@@ -3594,6 +3683,11 @@ function ProfileSettings({
 function Organizer({
   go,
   onLogout,
+  initialTab = "overview",
+  focusRegistrationId = null,
+  focusEventId = null,
+  notifications = 0,
+  clearNotificationNavigation,
   registrations,
   updateRegistration,
   profile,
@@ -3611,6 +3705,11 @@ function Organizer({
 }: {
   go: (page: Page) => void
   onLogout: () => void
+  initialTab?: string
+  focusRegistrationId?: string | null
+  focusEventId?: string | null
+  notifications?: number
+  clearNotificationNavigation: () => void
   registrations: RegistrationRecord[]
   updateRegistration: (id: string, status: RegistrationStatus) => Promise<void>
   profile: UserProfile | null
@@ -3644,10 +3743,11 @@ function Organizer({
     ["settings", "settings", "Profile settings"],
     ["participant", "users", "Switch to participant"],
   ]
-  const [tab, setTab] = useState("overview")
+  const [tab, setTab] = useState(initialTab)
   const [eventToCancel, setEventToCancel] = useState<EventItem | null>(null)
   const [editingEvent, setEditingEvent] = useState<EventItem | null>(null)
   const [eventActionError, setEventActionError] = useState("")
+  useEffect(() => setTab(initialTab), [initialTab])
   const cancelEvent = async () => {
     if (!eventToCancel) return
     try {
@@ -3659,12 +3759,16 @@ function Organizer({
     }
   }
   return (
-    <main className="dashboard-shell">
+    <main className="dashboard-shell organizer-dashboard">
       <DashboardSidebar
         title="Organizer studio"
         nav={nav}
         active={tab}
-        select={(id) => (id === "participant" ? go("dashboard") : setTab(id))}
+        select={(id) => {
+          clearNotificationNavigation()
+          if (id === "participant") go("dashboard")
+          else setTab(id)
+        }}
         go={go}
         onLogout={onLogout}
         profile={profile}
@@ -3674,11 +3778,15 @@ function Organizer({
           title={nav.find((item) => item[0] === tab)?.[2] || ""}
           go={go}
           profile={profile}
+          notifications={notifications}
         />
         <div className="dashboard-inner">
           {tab === "overview" && (
             <OrganizerOverview
-              setTab={setTab}
+              setTab={(nextTab) => {
+                clearNotificationNavigation()
+                setTab(nextTab)
+              }}
               registrations={registrations}
               loading={registrationsLoading}
               error={registrationsError}
@@ -3688,7 +3796,10 @@ function Organizer({
           {tab === "create" && (
             <CreateEvent
               key={editingEvent?.id || "new-event"}
-              setTab={setTab}
+              setTab={(nextTab) => {
+                clearNotificationNavigation()
+                setTab(nextTab)
+              }}
               onPublish={onPublishEvent}
               editEvent={editingEvent || undefined}
             />
@@ -3699,10 +3810,15 @@ function Organizer({
               publish={onPublishDraft}
               complete={onCompleteEvent}
               edit={(event) => {
+                clearNotificationNavigation()
                 setEditingEvent(event)
                 setTab("create")
               }}
-              setTab={setTab}
+              setTab={(nextTab) => {
+                clearNotificationNavigation()
+                setTab(nextTab)
+              }}
+              focusEventId={focusEventId}
               go={go}
               ownEvents={ownEvents}
               loading={eventsLoading}
@@ -3715,6 +3831,7 @@ function Organizer({
               registrations={registrations}
               updateRegistration={updateRegistration}
               initialFilter={tab}
+              focusRegistrationId={focusRegistrationId}
               loading={registrationsLoading}
               error={registrationsError}
             />
@@ -3764,7 +3881,7 @@ function OrganizerOverview({
   })
   const maxMonthlyRegistrations = Math.max(1, ...monthlyRegistrations.map((item) => item.count))
   const upcomingEvents = ownEvents.filter((event) => event.status === "published" && (event.eventDate || "") >= today).length
-  const completedEvents = ownEvents.filter((event) => Boolean(event.eventDate && event.eventDate < today)).length
+  const completedEvents = ownEvents.filter((event) => event.status === "completed").length
   return (
     <>
       <section className="dash-section intro-section">
@@ -3865,6 +3982,8 @@ function CreateEvent({
     endTime: editEvent?.endTimeValue || "",
     venue: editEvent?.location || "",
     registrationDeadline: editEvent?.registrationDeadline || "",
+    organizingDepartment: editEvent?.organizingDepartment || "",
+    targetDepartments: editEvent?.targetDepartments || [],
     capacity: String(editEvent?.seats ?? 100),
     price: "0",
   })
@@ -3923,8 +4042,24 @@ function CreateEvent({
     setImagePreviewUrl(objectUrl)
     return () => URL.revokeObjectURL(objectUrl)
   }, [selectedImageFile])
-  const updateForm = (key: keyof typeof form, value: string) =>
+  const updateForm = (key: Exclude<keyof typeof form, "targetDepartments">, value: string) =>
     setForm((current) => ({ ...current, [key]: value }))
+  const toggleTargetDepartment = (department: string) =>
+    setForm((current) => {
+      if (department === "All Departments") {
+        return {
+          ...current,
+          targetDepartments: current.targetDepartments.includes(department) ? [] : [department],
+        }
+      }
+      const selectedDepartments = current.targetDepartments.filter((item) => item !== "All Departments")
+      return {
+        ...current,
+        targetDepartments: selectedDepartments.includes(department)
+          ? selectedDepartments.filter((item) => item !== department)
+          : [...selectedDepartments, department],
+      }
+    })
   const publishEvent = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     if (saving) return
@@ -3952,6 +4087,8 @@ function CreateEvent({
       venue: form.venue.trim(),
       eventDate: form.date,
       registrationDeadline: form.registrationDeadline,
+      organizingDepartment: form.organizingDepartment,
+      targetDepartments: form.targetDepartments,
       capacity: Number(form.capacity),
       startTime: form.startTime,
       endTime: form.endTime,
@@ -3963,6 +4100,8 @@ function CreateEvent({
           venue: editEvent.location,
           eventDate: dateInputValue(editEvent.eventDate),
           registrationDeadline: dateInputValue(editEvent.registrationDeadline),
+          organizingDepartment: editEvent.organizingDepartment || "",
+          targetDepartments: editEvent.targetDepartments || [],
           capacity: editEvent.seats,
           startTime: timeInputValue(editEvent.startTimeValue),
           endTime: timeInputValue(editEvent.endTimeValue),
@@ -3970,7 +4109,7 @@ function CreateEvent({
       : persistedBaseline
     const changedFields: EventFormField[] = isEditing
       ? eventFormFields.filter(
-          (field) => eventValues[field] !== originalValues?.[field],
+          (field) => JSON.stringify(eventValues[field]) !== JSON.stringify(originalValues?.[field]),
         )
       : [...eventFormFields]
     if (isEditing && status !== (persistedStatus || editEvent?.status)) changedFields.push("status")
@@ -4126,6 +4265,37 @@ function CreateEvent({
                   <option>Hybrid</option>
                 </select>
               </div>
+            </div>
+            <div className="form-grid department-form-grid">
+              <div className="form-field">
+                <label htmlFor="organizing-department">Organizing Department / Faculty</label>
+                <select
+                  id="organizing-department"
+                  value={form.organizingDepartment}
+                  onChange={(event) => updateForm("organizingDepartment", event.target.value)}
+                >
+                  <option value="">Select department / faculty</option>
+                  {departmentOptions.map((department) => (
+                    <option key={department} value={department}>{department}</option>
+                  ))}
+                </select>
+              </div>
+              <fieldset className="department-selection">
+                <legend>Event For / Target Department</legend>
+                <p>Select every department the event is open to.</p>
+                <div className="department-checkbox-grid">
+                  {targetDepartmentOptions.map((department) => (
+                    <label key={department}>
+                      <input
+                        type="checkbox"
+                        checked={form.targetDepartments.includes(department)}
+                        onChange={() => toggleTargetDepartment(department)}
+                      />
+                      <span>{department}</span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
             </div>
           </section>
           <section className="form-section">
@@ -4412,6 +4582,7 @@ function ManageEvents({
   ownEvents,
   loading,
   error,
+  focusEventId = null,
   selectEvent,
 }: {
   cancel: (event: EventItem) => void
@@ -4423,16 +4594,20 @@ function ManageEvents({
   ownEvents: EventItem[]
   loading: boolean
   error: string
+  focusEventId?: string | null
   selectEvent: (id: EventItem["id"]) => void
 }) {
   const [filter, setFilter] = useState<EventStatus | "all">("all")
   const [publishingId, setPublishingId] = useState<EventItem["id"] | null>(null)
+  const [eventToComplete, setEventToComplete] = useState<EventItem | null>(null)
+  const [completingId, setCompletingId] = useState<EventItem["id"] | null>(null)
   const [actionError, setActionError] = useState("")
   const [actionSuccess, setActionSuccess] = useState("")
   const statuses: EventStatus[] = ["published", "draft", "completed", "cancelled"]
-  const filteredEvents = filter === "all"
-    ? ownEvents
-    : ownEvents.filter((event) => event.status === filter)
+  const filteredEvents = ownEvents.filter((event) =>
+    (!focusEventId || String(event.id) === focusEventId) &&
+    (filter === "all" || event.status === filter),
+  )
   const publishDraft = async (event: EventItem) => {
     setPublishingId(event.id)
     setActionError("")
@@ -4446,17 +4621,25 @@ function ManageEvents({
       setPublishingId(null)
     }
   }
-  const markCompleted = async (event: EventItem) => {
+  const markCompleted = async () => {
+    if (!eventToComplete) return
+    const event = eventToComplete
     setActionError("")
     setActionSuccess("")
+    setCompletingId(event.id)
     try {
       await complete(event)
       setActionSuccess(`${event.title} marked as completed.`)
+      setEventToComplete(null)
     } catch (completionError) {
       setActionError(completionError instanceof Error ? completionError.message : "Could not update this event.")
+      setEventToComplete(null)
+    } finally {
+      setCompletingId(null)
     }
   }
   return (
+    <>
     <section className="dash-section standalone">
       <div className="dash-section-title">
         <div>
@@ -4491,8 +4674,14 @@ function ManageEvents({
             <EventImage src={event.image} alt="" />
             <div className="manage-info">
               <div>
-                <span className={`status-badge ${event.status === "published" ? "success" : ""}`}>
-                  {event.status || "Draft"}
+                <span className={`status-badge ${
+                  event.status === "published" || event.status === "completed"
+                    ? "success"
+                    : event.status === "cancelled"
+                      ? "danger"
+                      : "neutral"
+                }`}>
+                  {event.status ? `${event.status[0].toUpperCase()}${event.status.slice(1)}` : "Draft"}
                 </span>
                 <small>{event.category}</small>
               </div>
@@ -4500,6 +4689,13 @@ function ManageEvents({
               <p>
                 {event.date}{event.time ? ` · ${event.time}` : ""} · {event.location}
               </p>
+              {(event.organizingDepartment || Boolean(event.targetDepartments?.length)) && (
+                <p className="manage-departments">
+                  {event.organizingDepartment && `Organized by ${event.organizingDepartment}`}
+                  {event.organizingDepartment && event.targetDepartments?.length ? " · " : ""}
+                  {Boolean(event.targetDepartments?.length) && `For ${event.targetDepartments?.join(", ")}`}
+                </p>
+              )}
               <div className="manage-progress">
                 <span>
                   <i style={{ width: `${event.seats ? Math.min(100, ((event.registeredCount ?? 0) / event.seats) * 100) : 0}%` }} />
@@ -4527,9 +4723,14 @@ function ManageEvents({
               {event.status === "published" && (
                 <Button
                   variant="ghost"
-                  onClick={() => void markCompleted(event)}
+                  disabled={completingId === event.id}
+                  onClick={() => {
+                    setActionError("")
+                    setActionSuccess("")
+                    setEventToComplete(event)
+                  }}
                 >
-                  Mark completed
+                  Mark as complete
                 </Button>
               )}
               {event.status !== "cancelled" && event.status !== "completed" && (
@@ -4559,6 +4760,19 @@ function ManageEvents({
         )}
       </div>
     </section>
+    {eventToComplete && (
+      <ConfirmModal
+        title="Mark this event as complete?"
+        text={`This will update “${eventToComplete.title}” to completed and keep that status on your event list.`}
+        confirm={completingId === eventToComplete.id ? "Updating…" : "Mark as complete"}
+        close={() => {
+          if (completingId === null) setEventToComplete(null)
+        }}
+        onConfirm={() => void markCompleted()}
+        confirmDisabled={completingId === eventToComplete.id}
+      />
+    )}
+    </>
   )
 }
 
@@ -4566,12 +4780,14 @@ function Participants({
   registrations,
   updateRegistration,
   initialFilter = "participants",
+  focusRegistrationId = null,
   loading,
   error,
 }: {
   registrations: RegistrationRecord[]
   updateRegistration: (id: string, status: RegistrationStatus) => Promise<void>
   initialFilter?: string
+  focusRegistrationId?: string | null
   loading: boolean
   error: string
 }) {
@@ -4586,6 +4802,11 @@ function Participants({
   const [notice, setNotice] = useState("")
   const [actionError, setActionError] = useState("")
   const [updatingId, setUpdatingId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!focusRegistrationId) return
+    const focusedRegistration = registrations.find((record) => record.id === focusRegistrationId)
+    if (focusedRegistration) setSelected(focusedRegistration)
+  }, [focusRegistrationId, registrations])
   const visible = registrations.filter((record) => {
     if (filter === "All Registrations") return true
     if (filter === "Pending Review") return record.status === "Pending"
@@ -5000,60 +5221,112 @@ function CategoriesAdmin() {
   )
 }
 
-function Notifications() {
-  const [filter, setFilter] = useState("All")
-  const notices = [
-    [
-      "ticket",
-      "Registration successful",
-      "Your spot at CodeStorm 2026 is confirmed.",
-      "Just now",
-      true,
-    ],
-    [
-      "clock",
-      "Event reminder",
-      "Future of AI Summit begins tomorrow at 10:30 AM.",
-      "2 hours ago",
-      true,
-    ],
-    [
-      "calendar",
-      "Event updated",
-      "The venue for Design Thinking Workshop has changed.",
-      "Yesterday",
-      false,
-    ],
-    [
-      "close",
-      "Event cancelled",
-      "Campus Cricket League has been cancelled by the organizer.",
-      "2 days ago",
-      false,
-    ],
-    [
-      "bell",
-      "Deadline approaching",
-      "Registration for Robotics Build League closes in 2 days.",
-      "3 days ago",
-      false,
-    ],
-  ]
+function notificationIcon(type: NotificationType): string {
+  switch (type) {
+    case "registration_success":
+      return "ticket"
+    case "registration_approved":
+    case "event_completed":
+      return "check"
+    case "registration_rejected":
+    case "event_cancelled":
+      return "close"
+    case "event_reminder":
+    case "registration_deadline":
+      return "clock"
+    case "new_registration":
+    case "registration_activity":
+      return "users"
+    default:
+      return "calendar"
+  }
+}
+
+function notificationCategory(type: NotificationType): string {
+  if (type.startsWith("registration_") || type === "new_registration") return "Registration"
+  if (type === "event_activity") return "Event activity"
+  return "Event update"
+}
+
+function formatNotificationDate(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "Date unavailable"
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date)
+}
+
+function Notifications({
+  notifications,
+  loading,
+  error,
+  authenticated,
+  onMarkAllRead,
+  onSetRead,
+  onDelete,
+  onOpen,
+  onLogin,
+}: {
+  notifications: NotificationRecord[]
+  loading: boolean
+  error: string
+  authenticated: boolean
+  onMarkAllRead: () => Promise<void>
+  onSetRead: (notification: NotificationRecord, isRead: boolean) => Promise<void>
+  onDelete: (notification: NotificationRecord) => Promise<void>
+  onOpen: (notification: NotificationRecord) => Promise<void>
+  onLogin: () => void
+}) {
+  const [filter, setFilter] = useState<"All" | "Unread" | "Updates">("All")
+  const [actionError, setActionError] = useState("")
+  const [actionInProgress, setActionInProgress] = useState("")
+  const [notificationToDelete, setNotificationToDelete] = useState<NotificationRecord | null>(null)
+  const unreadCount = notifications.filter((notification) => !notification.is_read).length
+  const filteredNotifications = notifications.filter((notification) => {
+    if (filter === "Unread") return !notification.is_read
+    if (filter === "Updates") {
+      return notification.type !== "registration_success"
+    }
+    return true
+  })
+  const runAction = async (key: string, action: () => Promise<void>) => {
+    setActionError("")
+    setActionInProgress(key)
+    try {
+      await action()
+    } catch (actionFailure) {
+      setActionError(actionFailure instanceof Error ? actionFailure.message : "Could not update this notification.")
+    } finally {
+      setActionInProgress("")
+    }
+  }
+  const openNotification = (notification: NotificationRecord) => {
+    void runAction(notification.id, () => onOpen(notification))
+  }
   return (
     <main className="page-main notification-page">
       <section className="container">
         <div className="notification-heading">
           <div>
-            <span className="eyebrow">Stay in the loop</span>
-            <h1>Notifications</h1>
+            <span className="eyebrow">Eventify updates</span>
+            <h1>Stay in the loop</h1>
             <p>Important updates about your events and registrations.</p>
           </div>
-          <button>Mark all as read</button>
+          <button
+            type="button"
+            disabled={!authenticated || loading || unreadCount === 0 || Boolean(actionInProgress)}
+            onClick={() => void runAction("all", onMarkAllRead)}
+          >
+            {actionInProgress === "all" ? "Marking as read…" : `Mark all as read${unreadCount ? ` (${unreadCount})` : ""}`}
+          </button>
         </div>
-        <div className="notification-tabs">
-          {["All", "Unread", "Updates"].map((item) => (
+        <div className="notification-tabs" role="group" aria-label="Filter notifications">
+          {(["All", "Unread", "Updates"] as const).map((item) => (
             <button
               key={item}
+              type="button"
+              aria-pressed={filter === item}
               className={filter === item ? "active" : ""}
               onClick={() => setFilter(item)}
             >
@@ -5061,26 +5334,112 @@ function Notifications() {
             </button>
           ))}
         </div>
-        <div className="notification-list">
-          {notices
-            .filter((n) => filter !== "Unread" || n[4])
-            .map(([icon, title, text, time, unread]) => (
-              <article className={unread ? "unread" : ""} key={String(title)}>
-                <span className="notification-icon">
-                  <Icon name={String(icon)} />
-                </span>
-                <div>
+        {(error || actionError) && (
+          <div className="error-text notification-error" role="alert">{actionError || error}</div>
+        )}
+        {!authenticated ? (
+          <div className="empty-state notification-empty">
+            <span><Icon name="bell" size={28} /></span>
+            <h3>Sign in to view your notifications</h3>
+            <p>Event updates and registration activity are available to your Eventify account.</p>
+            <Button onClick={onLogin}>Sign in</Button>
+          </div>
+        ) : (
+          <div className="notification-list" aria-live="polite">
+            {loading && (
+              <p className="notification-loading" role="status">Loading your notifications…</p>
+            )}
+            {!loading && filteredNotifications.map((notification) => (
+              <article
+                className={`notification-item ${notification.is_read ? "" : "unread"}`}
+                key={notification.id}
+              >
+                <button
+                  type="button"
+                  className="notification-open"
+                  aria-label={`Open ${notification.title} for ${notification.event_title}${notification.is_read ? ", read" : ", unread"}`}
+                  disabled={actionInProgress === notification.id}
+                  onClick={() => openNotification(notification)}
+                >
+                  <span className={`notification-icon notification-tone-${notification.type}`}>
+                    <Icon name={notificationIcon(notification.type)} />
+                  </span>
+                  <span className="notification-copy">
+                    <span className="notification-title-row">
+                      <strong>{notification.title}</strong>
+                      <span className={`notification-read-state ${notification.is_read ? "read" : "unread"}`}>
+                        {notification.is_read ? "Read" : "Unread"}
+                      </span>
+                    </span>
+                    <span className="notification-message">{notification.message}</span>
+                    <span className="notification-meta">
+                      <strong>{notification.event_title}</strong>
+                      <span>{notificationCategory(notification.type)}</span>
+                      <time dateTime={notification.created_at}>{formatNotificationDate(notification.created_at)}</time>
+                    </span>
+                  </span>
+                </button>
+                <details className="notification-actions">
+                  <summary aria-label={`Actions for ${notification.title}`}>
+                    <span aria-hidden="true">•••</span>
+                  </summary>
                   <div>
-                    <h3>{title}</h3>
-                    {unread && <i />}
+                    <button
+                      type="button"
+                      disabled={Boolean(actionInProgress)}
+                      onClick={() => void runAction(notification.id, () => onSetRead(notification, !notification.is_read))}
+                    >
+                      Mark as {notification.is_read ? "unread" : "read"}
+                    </button>
+                    <button
+                      type="button"
+                      className="notification-delete-action"
+                      disabled={Boolean(actionInProgress)}
+                      onClick={() => setNotificationToDelete(notification)}
+                    >
+                      Delete notification
+                    </button>
                   </div>
-                  <p>{text}</p>
-                  <small>{time}</small>
-                </div>
-                <button>•••</button>
+                </details>
               </article>
             ))}
-        </div>
+            {!loading && filteredNotifications.length === 0 && (
+              <div className="empty-state notification-empty">
+                <span><Icon name="bell" size={28} /></span>
+                <h3>
+                  {error
+                    ? "Notifications could not be loaded"
+                    : notifications.length === 0
+                      ? "You’re all caught up"
+                      : `No ${filter.toLowerCase()} notifications`}
+                </h3>
+                <p>
+                  {error
+                    ? "Check your connection and try again later."
+                    : notifications.length === 0
+                      ? "Registration activity and event updates will appear here when they happen."
+                      : "Try another filter to see your notifications."}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+        {notificationToDelete && (
+          <ConfirmModal
+            title="Delete this notification?"
+            text={`“${notificationToDelete.title}” for ${notificationToDelete.event_title} will be permanently removed from your notification list.`}
+            confirm={actionInProgress === notificationToDelete.id ? "Deleting…" : "Delete notification"}
+            close={() => setNotificationToDelete(null)}
+            onConfirm={() => {
+              const target = notificationToDelete
+              void runAction(target.id, async () => {
+                await onDelete(target)
+                setNotificationToDelete(null)
+              })
+            }}
+            confirmDisabled={Boolean(actionInProgress)}
+          />
+        )}
       </section>
     </main>
   )
@@ -5092,26 +5451,35 @@ function ConfirmModal({
   confirm,
   close,
   onConfirm,
+  confirmDisabled = false,
 }: {
   title: string
   text: string
   confirm: string
   close: () => void
   onConfirm?: () => void
+  confirmDisabled?: boolean
 }) {
   return (
     <div className="modal-backdrop" onMouseDown={close}>
-      <div className="confirm-modal" onMouseDown={(e) => e.stopPropagation()}>
+      <div
+        className="confirm-modal"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-modal-title"
+        aria-describedby="confirm-modal-description"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <span className="modal-icon">
           <Icon name="close" />
         </span>
-        <h2>{title}</h2>
-        <p>{text}</p>
+        <h2 id="confirm-modal-title">{title}</h2>
+        <p id="confirm-modal-description">{text}</p>
         <div>
-          <Button variant="secondary" onClick={close}>
+          <Button variant="secondary" onClick={close} disabled={confirmDisabled}>
             Keep it
           </Button>
-          <Button variant="danger" onClick={onConfirm || close}>
+          <Button variant="danger" onClick={onConfirm || close} disabled={confirmDisabled}>
             {confirm}
           </Button>
         </div>
@@ -5155,6 +5523,8 @@ export default function App() {
       "description",
       "venue",
       "event_date",
+      "organizing_department",
+      "target_departments",
       "start_time",
       "end_time",
       "registration_deadline",
@@ -5281,6 +5651,7 @@ export default function App() {
         if (!active || sequence !== authSequence.current) return
         profileRef.current = nextProfile
         setProfile(nextProfile)
+        setNotificationNavigation(null)
         setAuthError("")
         setVerificationIssue(false)
         if (navigate) {
@@ -5401,7 +5772,97 @@ export default function App() {
   const [organizerRegistrationsLoading, setOrganizerRegistrationsLoading] = useState(false)
   const [organizerRegistrationsError, setOrganizerRegistrationsError] = useState("")
   const [latestRegistrationId, setLatestRegistrationId] = useState("")
-  const [notifications] = useState(0)
+  const [notificationRecords, setNotificationRecords] = useState<NotificationRecord[]>([])
+  const [notificationUserId, setNotificationUserId] = useState<string | null>(null)
+  const [notificationLoading, setNotificationLoading] = useState(false)
+  const [notificationError, setNotificationError] = useState("")
+  const [notificationNavigation, setNotificationNavigation] = useState<NotificationNavigation | null>(null)
+  const notifications = notificationRecords.filter((notification) => !notification.is_read).length
+  useEffect(() => {
+    let active = true
+    let channel: ReturnType<typeof supabase.channel> | undefined
+
+    if (!profile) {
+      setNotificationRecords([])
+      setNotificationUserId(null)
+      setNotificationLoading(false)
+      setNotificationError("")
+      return () => { active = false }
+    }
+
+    setNotificationRecords([])
+    setNotificationUserId(null)
+    setNotificationLoading(true)
+    setNotificationError("")
+    const loadNotifications = async (userId: string, initialLoad = false) => {
+      if (initialLoad) setNotificationLoading(true)
+      try {
+        const { data, error } = await supabase
+          .from("notifications")
+          .select("id, user_id, event_id, registration_id, event_title, title, message, type, is_read, created_at, updated_at")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false })
+        if (error) throw new Error(`Could not load notifications: ${error.message}`)
+        if (active) {
+          setNotificationRecords((data || []) as NotificationRecord[])
+          setNotificationError("")
+        }
+      } catch (loadError) {
+        const message = loadError instanceof Error ? loadError.message : "Could not load notifications."
+        console.error(message, loadError)
+        if (active) setNotificationError(message)
+      } finally {
+        if (initialLoad && active) setNotificationLoading(false)
+      }
+    }
+
+    const initializeNotifications = async () => {
+      setNotificationLoading(true)
+      setNotificationError("")
+      try {
+        const { data, error } = await supabase.auth.getSession()
+        if (error) throw new Error(`Could not verify notification access: ${error.message}`)
+        if (!data.session) throw new Error("Please sign in again to view your notifications.")
+        const userId = data.session.user.id
+        if (!active) return
+        setNotificationUserId(userId)
+        channel = supabase
+          .channel(`eventify-notifications:${userId}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "notifications",
+              filter: `user_id=eq.${userId}`,
+            },
+            () => { void loadNotifications(userId) },
+          )
+          .subscribe((status) => {
+            if (!active || status === "SUBSCRIBED") return
+            if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+              setNotificationError("Live notification updates are unavailable. Reload the page to refresh your notifications.")
+            }
+          })
+        await loadNotifications(userId, true)
+      } catch (loadError) {
+        const message = loadError instanceof Error ? loadError.message : "Could not verify notification access."
+        console.error(message, loadError)
+        if (active) {
+          setNotificationRecords([])
+          setNotificationUserId(null)
+          setNotificationError(message)
+          setNotificationLoading(false)
+        }
+      }
+    }
+
+    void initializeNotifications()
+    return () => {
+      active = false
+      if (channel) void supabase.removeChannel(channel)
+    }
+  }, [profile])
   useEffect(() => {
     let active = true
     const loadPublishedEvents = async () => {
@@ -5480,40 +5941,161 @@ export default function App() {
       active = false
     }
   }, [page, profile])
+    // Realtime synchronization for events across all devices
+  useEffect(() => {
+    if (!profile) return
+
+    let active = true
+
+    const refreshEvents = async () => {
+      try {
+        const selectColumns = await eventSelectColumns()
+
+        // Refresh all published events for participants
+        const { data: publishedData, error: publishedError } =
+          await supabase
+            .from("events")
+            .select(selectColumns)
+            .eq("status", "published")
+            .order("event_date", { ascending: true })
+
+        if (publishedError) throw publishedError
+
+        const published = await loadEventRegistrationCounts(
+          (publishedData || []).map((record) =>
+            eventFromRecord(eventRecordFromRow(record))
+          )
+        )
+
+        if (active) {
+          setPublishedEvents(published)
+          setPublishedEventsError("")
+        }
+
+        // Refresh the organizer's own events
+        if (profile.role === "organizer" && isApprovedOrganizer(profile)) {
+          const organizerId = await getApprovedOrganizerId()
+
+          const { data: ownData, error: ownError } = await supabase
+            .from("events")
+            .select(selectColumns)
+            .eq("organizer_id", organizerId)
+            .order("event_date", { ascending: true })
+
+          if (ownError) throw ownError
+
+          const own = await loadEventRegistrationCounts(
+            (ownData || []).map((record) =>
+              eventFromRecord(eventRecordFromRow(record))
+            )
+          )
+
+          if (active) {
+            setOwnEvents(own)
+            setEventsError("")
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error
+          ? error.message
+          : "Could not synchronize events."
+
+        console.error("Event synchronization failed:", error)
+
+        if (active) {
+          setPublishedEventsError(message)
+          setEventsError(message)
+        }
+      }
+    }
+
+    const channel = supabase
+      .channel("eventify-events-realtime")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "events",
+        },
+        () => {
+          void refreshEvents()
+        }
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("Live event synchronization is unavailable.")
+        }
+      })
+
+    return () => {
+      active = false
+      void supabase.removeChannel(channel)
+    }
+  }, [profile])
+
   const eventCountChannelKey = useMemo(
     () => [...new Set([...publishedEvents, ...ownEvents].map((event) => String(event.id)))].join("|"),
     [publishedEvents, ownEvents],
   )
   useEffect(() => {
-    if (!eventCountChannelKey) return
-    const channels = eventCountChannelKey.split("|").map((eventId) =>
-      supabase
-        .channel(`event-registration-counts:${eventId}`)
-        .on("broadcast", { event: "registration_changed" }, () => {
-          void refreshRegistrationCountsRef.current([eventId]).catch((error: unknown) => {
+  if (!eventCountChannelKey) return
+
+  const channels = eventCountChannelKey.split("|").map((eventId) =>
+    supabase
+      .channel(`event-registration-counts:${eventId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "registrations",
+          filter: `event_id=eq.${eventId}`,
+        },
+        async () => {
+          try {
+            await refreshRegistrationCountsRef.current([eventId])
+
+            const { data, error } = await supabase.rpc(
+              "get_organizer_registrations"
+            )
+
+            if (error) throw error
+
+            const mapped = (
+              (data || []) as OrganizerRegistrationRow[]
+            ).map(organizerRegistrationFromRow)
+
+            setOrganizerRegistrations(mapped)
+            setOrganizerRegistrationsError("")
+          } catch (error) {
             const message = error instanceof Error
               ? error.message
-              : "Could not refresh event registration counts."
+              : "Could not refresh organizer registrations."
+
             console.error(message, error)
-            setPublishedEventsError(message)
-            setEventsError(message)
-          })
-        })
-        .subscribe((status) => {
-          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-            const message = `Realtime registration counts are unavailable for event ${eventId}.`
-            console.error(message)
-            setPublishedEventsError(message)
-            setEventsError(message)
+            setOrganizerRegistrationsError(message)
           }
-        }),
-    )
-    return () => {
-      channels.forEach((channel) => {
-        void supabase.removeChannel(channel)
+        }
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          const message =
+            `Realtime registration updates are unavailable for event ${eventId}.`
+
+          console.error(message)
+          setPublishedEventsError(message)
+          setEventsError(message)
+        }
       })
-    }
-  }, [eventCountChannelKey])
+  )
+
+  return () => {
+    channels.forEach((channel) => {
+      void supabase.removeChannel(channel)
+    })
+  }
+}, [eventCountChannelKey])
   useEffect(() => {
     if (
       (page !== "dashboard" && page !== "details") ||
@@ -5539,7 +6121,7 @@ export default function App() {
         const { data: eventRecords, error: eventsError } = eventIds.length
           ? await supabase
               .from("events")
-              .select("id, title, description, venue, event_date, start_time, end_time, registration_deadline, capacity, organizer_id, status")
+              .select("id, title, description, venue, event_date, organizing_department, target_departments, start_time, end_time, registration_deadline, capacity, organizer_id, status")
               .in("id", eventIds)
           : { data: [], error: null }
         if (eventsError) throw eventsError
@@ -5654,6 +6236,7 @@ export default function App() {
       const nextProfile = await fetchProfile(data.user.id)
       profileRef.current = nextProfile
       setProfile(nextProfile)
+      setNotificationNavigation(null)
       setAuthError("")
       if (nextProfile.role === "organizer" && nextProfile.organizerStatus !== "approved") {
         setPage("organizer-login")
@@ -5754,10 +6337,12 @@ export default function App() {
     }
     profileRef.current = null
     setProfile(null)
+    setNotificationNavigation(null)
     setPage("login")
     setAuthError("")
   }
   const go = (next: Page) => {
+    setNotificationNavigation(null)
     const currentProfile = profileRef.current
     let destination = next
     if (next === "organizer" && !isApprovedOrganizer(currentProfile)) {
@@ -5773,6 +6358,125 @@ export default function App() {
       destination = "participant-login"
     }
     setPage(destination)
+    window.scrollTo({ top: 0, behavior: "smooth" })
+  }
+  const clearNotificationNavigation = () => setNotificationNavigation(null)
+  const setNotificationRead = async (
+    notification: NotificationRecord,
+    isRead: boolean,
+  ) => {
+    if (!notificationUserId) throw new Error("Please sign in again to manage notifications.")
+    setNotificationError("")
+    const previousReadState = notification.is_read
+    setNotificationRecords((current) =>
+      current.map((item) => item.id === notification.id ? { ...item, is_read: isRead } : item),
+    )
+    try {
+      const { data, error } = await supabase
+        .from("notifications")
+        .update({ is_read: isRead })
+        .eq("id", notification.id)
+        .eq("user_id", notificationUserId)
+        .select("id, is_read")
+        .single()
+      if (error) throw new Error(error.message)
+      setNotificationRecords((current) =>
+        current.map((item) => item.id === data.id ? { ...item, is_read: data.is_read } : item),
+      )
+    } catch (error) {
+      const message = `Could not update notification: ${error instanceof Error ? error.message : "Unexpected database error."}`
+      setNotificationRecords((current) =>
+        current.map((item) => item.id === notification.id
+          ? { ...item, is_read: previousReadState }
+          : item),
+      )
+      setNotificationError(message)
+      throw new Error(message)
+    }
+  }
+  const markAllNotificationsRead = async () => {
+    if (!notificationUserId) throw new Error("Please sign in again to manage notifications.")
+    setNotificationError("")
+    const unreadIds = new Set(
+      notificationRecords.filter((notification) => !notification.is_read).map((notification) => notification.id),
+    )
+    if (!unreadIds.size) return
+    setNotificationRecords((current) =>
+      current.map((notification) => unreadIds.has(notification.id)
+        ? { ...notification, is_read: true }
+        : notification),
+    )
+    try {
+      const { data, error } = await supabase
+        .from("notifications")
+        .update({ is_read: true })
+        .eq("user_id", notificationUserId)
+        .eq("is_read", false)
+        .select("id")
+      if (error) throw new Error(error.message)
+      const updatedIds = new Set((data || []).map((item) => item.id))
+      setNotificationRecords((current) =>
+        current.map((notification) => updatedIds.has(notification.id)
+          ? { ...notification, is_read: true }
+          : notification),
+      )
+    } catch (error) {
+      const message = `Could not mark notifications as read: ${error instanceof Error ? error.message : "Unexpected database error."}`
+      setNotificationRecords((current) =>
+        current.map((notification) => unreadIds.has(notification.id)
+          ? { ...notification, is_read: false }
+          : notification),
+      )
+      setNotificationError(message)
+      throw new Error(message)
+    }
+  }
+  const deleteNotification = async (notification: NotificationRecord) => {
+    if (!notificationUserId) throw new Error("Please sign in again to manage notifications.")
+    setNotificationError("")
+    const previousRecord = notificationRecords.find((item) => item.id === notification.id)
+    setNotificationRecords((current) => current.filter((item) => item.id !== notification.id))
+    try {
+      const { error } = await supabase
+        .from("notifications")
+        .delete()
+        .eq("id", notification.id)
+        .eq("user_id", notificationUserId)
+        .select("id")
+        .single()
+      if (error) throw new Error(error.message)
+    } catch (error) {
+      const message = `Could not delete notification: ${error instanceof Error ? error.message : "Unexpected database error."}`
+      if (previousRecord) {
+        setNotificationRecords((current) =>
+          current.some((item) => item.id === previousRecord.id)
+            ? current
+            : [...current, previousRecord].sort((left, right) =>
+                right.created_at.localeCompare(left.created_at),
+              ),
+        )
+      }
+      setNotificationError(message)
+      throw new Error(message)
+    }
+  }
+  const openNotification = async (notification: NotificationRecord) => {
+    if (!notification.is_read) {
+      await setNotificationRead(notification, true)
+    }
+    if (!profile) {
+      go("login")
+      return
+    }
+    const tab = profile.role === "organizer"
+      ? notification.registration_id ? "participants" : "manage"
+      : "registrations"
+    setNotificationNavigation({
+      tab,
+      registrationId: notification.registration_id,
+      eventId: notification.event_id,
+    })
+    setPage(profile.role === "organizer" ? "organizer" : "dashboard")
     window.scrollTo({ top: 0, behavior: "smooth" })
   }
   useEffect(() => {
@@ -5852,6 +6556,8 @@ export default function App() {
         description: event.description,
         venue: event.venue,
         event_date: event.eventDate,
+        organizing_department: event.organizingDepartment || null,
+        target_departments: event.targetDepartments,
         start_time: event.startTime || null,
         end_time: event.endTime || null,
         registration_deadline: event.registrationDeadline,
@@ -5863,6 +6569,8 @@ export default function App() {
         venue: "venue",
         eventDate: "event_date",
         registrationDeadline: "registration_deadline",
+        organizingDepartment: "organizing_department",
+        targetDepartments: "target_departments",
         capacity: "capacity",
         startTime: "start_time",
         endTime: "end_time",
@@ -6042,6 +6750,8 @@ export default function App() {
       description: event.description || null,
       venue: event.location,
       event_date: event.eventDate || "",
+      organizing_department: event.organizingDepartment || null,
+      target_departments: event.targetDepartments || [],
       start_time: null,
       end_time: null,
       registration_deadline: event.registrationDeadline || "",
@@ -6235,7 +6945,10 @@ export default function App() {
         <Dashboard
           go={go}
           onLogout={logout}
-          initialTab={page === "profile" ? "profile" : "dashboard"}
+          initialTab={notificationNavigation?.tab || (page === "profile" ? "profile" : "dashboard")}
+          focusRegistrationId={notificationNavigation?.registrationId}
+          notifications={notifications}
+          clearNotificationNavigation={clearNotificationNavigation}
           saved={saved}
           toggleSave={toggleSave}
           registrations={participantRegistrations}
@@ -6253,6 +6966,11 @@ export default function App() {
         <Organizer
           go={go}
           onLogout={logout}
+          initialTab={notificationNavigation?.tab || "overview"}
+          focusRegistrationId={notificationNavigation?.registrationId}
+          focusEventId={notificationNavigation?.eventId}
+          notifications={notifications}
+          clearNotificationNavigation={clearNotificationNavigation}
           registrations={organizerRegistrations}
           updateRegistration={updateRegistration}
           profile={profile}
@@ -6270,7 +6988,19 @@ export default function App() {
         />
       )}
       {page === "admin" && <Admin go={go} onLogout={logout} />}
-      {page === "notifications" && <Notifications />}
+      {page === "notifications" && (
+        <Notifications
+          notifications={notificationRecords}
+          loading={notificationLoading}
+          error={notificationError}
+          authenticated={Boolean(profile)}
+          onMarkAllRead={markAllNotificationsRead}
+          onSetRead={setNotificationRead}
+          onDelete={deleteNotification}
+          onOpen={openNotification}
+          onLogin={() => go("login")}
+        />
+      )}
     </div>
   )
 }
