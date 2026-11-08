@@ -51,6 +51,12 @@ The migration intentionally stops if events RLS is disabled, if the expected `ev
 
 New event categories are saved in `events.category` and power the Explore category filter. Existing events with no category remain visible under the generic “Event” category.
 
+## Event registration fees
+
+Before deploying the frontend changes, review and run `migrations/20261107030000_add_event_registration_fee.sql` in the intended Supabase project. It adds a non-negative numeric `price` column to the existing `events` table, defaults existing events to zero, and grants anonymous visitors column-level access to this public fee. The migration stops if an existing `price` column has an incompatible type or contains negative values.
+
+The organizer ticket-price field now saves to `events.price`; published event filters use the stored value, and only a zero fee is shown as free. Apply the migration before using the updated event editor or public event browsing. It does not change event RLS policies or expose organizer-only fields.
+
 ## Event mentors and speakers
 
 Before deploying the frontend changes, review and run `migrations/20261106090000_create_event_people.sql` in the intended project's Supabase SQL Editor. The migration derives `event_people.event_id` from the existing `events.id` column type, adds a foreign key with cascading cleanup when an event is deleted, and creates the `event_people` table with role validation and display ordering. It stops before making changes if `public.events` or `public.profiles` is missing, or if an `event_people` table already exists; inspect any existing table rather than dropping or replacing it.

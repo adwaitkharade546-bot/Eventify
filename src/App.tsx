@@ -4,7 +4,43 @@ import { supabase } from "./lib/supabase"
 type UserRole = "participant" | "organizer"
 type OrganizerStatus = "not_requested" | "pending" | "approved" | "rejected"
 type EventStatus = "draft" | "published" | "completed" | "cancelled"
-type Page = "home" | "explore" | "details" | "login" | "participant-login" | "organizer-login" | "signup" | "organizer-signup" | "participant-signup" | "register" | "review" | "confirmation" | "email-callback" | "dashboard" | "profile" | "organizer" | "admin" | "notifications"
+type Page = "home" | "explore" | "details" | "login" | "participant-login" | "organizer-login" | "signup" | "organizer-signup" | "participant-signup" | "register" | "review" | "confirmation" | "email-callback" | "reset-password" | "dashboard" | "profile" | "organizer" | "admin" | "notifications"
+const appPages: Page[] = [
+  "home",
+  "explore",
+  "details",
+  "login",
+  "participant-login",
+  "organizer-login",
+  "signup",
+  "organizer-signup",
+  "participant-signup",
+  "register",
+  "review",
+  "confirmation",
+  "email-callback",
+  "reset-password",
+  "dashboard",
+  "profile",
+  "organizer",
+  "admin",
+  "notifications",
+]
+
+function restoredPage(): Page {
+  const requestedPage = new URLSearchParams(window.location.search).get("eventify_page")
+  return appPages.includes(requestedPage as Page) ? requestedPage as Page : "home"
+}
+
+function restoredEventId(): string | null {
+  return new URLSearchParams(window.location.search).get("eventify_event")
+}
+
+function readStoredTab(key: string, initialTab: string, defaultTab: string, allowed: string[]) {
+  if (initialTab !== defaultTab) return initialTab
+  const storedTab = window.sessionStorage.getItem(key)
+  return storedTab && allowed.includes(storedTab) ? storedTab : defaultTab
+}
 
 type UserProfile = {
   fullName: string
@@ -16,6 +52,17 @@ type UserProfile = {
 }
 
 type ProfileDetails = Partial<Pick<UserProfile, "fullName" | "phone" | "organization">>
+type NotificationPreferences = {
+  eventReminders: boolean
+  registrationUpdates: boolean
+  recommendedEvents: boolean
+}
+
+const defaultNotificationPreferences: NotificationPreferences = {
+  eventReminders: true,
+  registrationUpdates: true,
+  recommendedEvents: true,
+}
 
 type AuthenticationResult =
   | { status: "authenticated" }
@@ -114,6 +161,7 @@ type EventItem = {
   location: string
   category: string
   price: string
+  registrationFee: number
   seats: number
   registeredCount?: number
   image: string
@@ -243,6 +291,7 @@ type EventRecord = {
   organizing_department: string | null
   target_departments: string[]
   capacity: number
+  price: number
   organizer_id: string | null
   status: string
   start_time: string | null
@@ -284,6 +333,7 @@ type NewEventInput = {
   organizingDepartment: string
   targetDepartments: string[]
   capacity: number
+  price: number
   startTime: string
   endTime: string
 }
@@ -306,6 +356,7 @@ const eventFormFields: (keyof NewEventInput)[] = [
   "organizingDepartment",
   "targetDepartments",
   "capacity",
+  "price",
   "startTime",
   "endTime",
 ]
@@ -399,7 +450,8 @@ function eventFromRecord(record: EventRecord): EventItem {
     time: [startTime, endTime].filter(Boolean).join(" – "),
     location: record.venue,
     category: record.category || "Event",
-    price: "Free",
+    price: record.price === 0 ? "Free" : String(record.price),
+    registrationFee: record.price,
     seats: record.capacity,
     image: imageUrl || defaultEventImage,
     imageUrl: imageUrl || undefined,
@@ -436,6 +488,14 @@ function eventRecordFromRow(value: unknown): EventRecord {
   if (typeof row.capacity !== "number") {
     throw new Error("Supabase returned an invalid event capacity.")
   }
+  const price = row.price === undefined
+    ? 0
+    : typeof row.price === "number" || typeof row.price === "string"
+      ? Number(row.price)
+      : Number.NaN
+  if (!Number.isFinite(price) || price < 0) {
+    throw new Error("Supabase returned an invalid event registration fee.")
+  }
   const record: EventRecord = {
     id: requiredString("id"),
     title: requiredString("title"),
@@ -453,6 +513,7 @@ function eventRecordFromRow(value: unknown): EventRecord {
       return value
     })(),
     capacity: row.capacity,
+    price,
     organizer_id: Object.prototype.hasOwnProperty.call(row, "organizer_id")
       ? nullableString("organizer_id")
       : null,
@@ -1069,9 +1130,43 @@ function Home({
   eventsError: string
 }) {
   const [query, setQuery] = useState("")
+  const [upcomingFilter, setUpcomingFilter] = useState<"All" | "This week" | "This month" | "Free">(() => {
+    const storedFilter = window.sessionStorage.getItem("eventify.home.upcomingFilter")
+    return storedFilter === "This week" || storedFilter === "This month" || storedFilter === "Free"
+      ? storedFilter
+      : "All"
+  })
   const highlightedEvent = eventList[0]
   const isParticipant = profile?.role === "participant"
   const isOrganizer = profile?.role === "organizer"
+  const upcomingEvents = useMemo(() => {
+    if (upcomingFilter === "Free") {
+      return eventList.filter((event) => event.registrationFee === 0)
+    }
+    if (upcomingFilter === "All") return eventList
+
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const end = new Date(today)
+    if (upcomingFilter === "This week") {
+      const weekStart = new Date(today)
+      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7))
+      end.setTime(weekStart.getTime())
+      end.setDate(end.getDate() + 7)
+    } else {
+      end.setDate(1)
+      end.setMonth(end.getMonth() + 1)
+    }
+    const startDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
+    const endDate = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")}`
+    return eventList.filter((event) => {
+      const eventDate = event.eventDate || ""
+      return eventDate >= startDate && eventDate < endDate
+    })
+  }, [eventList, upcomingFilter])
+  useEffect(() => {
+    window.sessionStorage.setItem("eventify.home.upcomingFilter", upcomingFilter)
+  }, [upcomingFilter])
   const search = (e: FormEvent) => {
     e.preventDefault()
     onSearch(query.trim())
@@ -1322,13 +1417,18 @@ function Home({
         <section className="section container">
           <div className="split-heading">
             <div>
-              <span className="eyebrow">Coming soon</span>
+              <span className="eyebrow">Published events</span>
               <h2>Don’t miss what’s next</h2>
             </div>
             <div className="filter-pills">
-              {["All", "This week", "This month", "Free"].map(
-                (filter, index) => (
-                  <button className={index === 0 ? "active" : ""} key={filter}>
+              {(["All", "This week", "This month", "Free"] as const).map(
+                (filter) => (
+                  <button
+                    aria-pressed={upcomingFilter === filter}
+                    className={upcomingFilter === filter ? "active" : ""}
+                    key={filter}
+                    onClick={() => setUpcomingFilter(filter)}
+                  >
                     {filter}
                   </button>
                 ),
@@ -1337,12 +1437,22 @@ function Home({
           </div>
           <div className="upcoming-list">
             {eventsError && <p className="error-text" role="alert">{eventsError}</p>}
-            {eventList.slice(3, 6).map((event) => (
+            {upcomingEvents.map((event) => (
               <article
                 key={event.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`View details for ${event.title}`}
                 onClick={() => {
                   selectEvent(event.id)
                   go("details")
+                }}
+                onKeyDown={(keyboardEvent) => {
+                  if (keyboardEvent.key === "Enter" || keyboardEvent.key === " ") {
+                    keyboardEvent.preventDefault()
+                    selectEvent(event.id)
+                    go("details")
+                  }
                 }}
               >
                 <div className="date-block">
@@ -1371,12 +1481,13 @@ function Home({
                 </span>
               </article>
             ))}
-            {!eventsLoading && !eventsError && eventList.length <= 3 && (
-              <p className="empty-events">
-                {eventList.length
-                  ? "More published events will appear here."
-                  : "No published events yet. Check back soon."}
-              </p>
+            {eventsLoading && <p role="status">Loading published events…</p>}
+            {!eventsLoading && !eventsError && upcomingEvents.length === 0 && (
+              <div className="empty-state">
+                <span><Icon name="calendar" size={28} /></span>
+                <h3>No events match this filter</h3>
+                <p>Try another filter to browse published campus events.</p>
+              </div>
             )}
           </div>
         </section>
@@ -1986,6 +2097,181 @@ function DetailSection({
   )
 }
 
+function ResetPassword({ go }: { go: (page: Page) => void }) {
+  const [password, setPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState("")
+  const [success, setSuccess] = useState(false)
+
+  const handleResetPassword = async (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault()
+    setError("")
+
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters long.")
+      return
+    }
+
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.")
+      return
+    }
+
+    setLoading(true)
+
+    try {
+      const { error } = await supabase.auth.updateUser({
+        password,
+      })
+
+      if (error) throw error
+
+      setSuccess(true)
+    } catch (resetError) {
+      setError(
+        resetError instanceof Error
+          ? resetError.message
+          : "Unable to update password. Please try again.",
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleContinue = async () => {
+    setLoading(true)
+    setError("")
+
+    try {
+      const { error } = await supabase.auth.signOut()
+
+      if (error) throw error
+
+      go("login")
+    } catch (logoutError) {
+      setError(
+        logoutError instanceof Error
+          ? logoutError.message
+          : "Unable to continue. Please try again.",
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <main className="registration-page">
+      <div className="container narrow-container">
+        <section className="role-login-card">
+          <span className="eyebrow">EVENTIFY ACCOUNT SECURITY</span>
+
+          {success ? (
+            <>
+              <h2>Password Updated Successfully!</h2>
+
+              <p>
+                Your password has been changed successfully.
+                You can now log in using your new password.
+              </p>
+
+              {error && (
+                <div className="error-text" role="alert">
+                  {error}
+                </div>
+              )}
+
+              <Button
+                className="full-width auth-submit"
+                onClick={handleContinue}
+                disabled={loading}
+              >
+                {loading ? "Please wait..." : "Continue to Login"}
+              </Button>
+            </>
+          ) : (
+            <>
+              <h2>Reset Your Password</h2>
+
+              <p>
+                Enter your new password below to secure your Eventify account.
+              </p>
+
+              <form onSubmit={handleResetPassword}>
+                <div className="form-field">
+                  <label>New Password</label>
+
+                  <div className="password-field">
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      placeholder="Enter new password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      minLength={8}
+                      required
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                    >
+                      {showPassword ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="form-field">
+                  <label>Confirm New Password</label>
+
+                  <div className="password-field">
+                    <input
+                      type={showConfirmPassword ? "text" : "password"}
+                      placeholder="Confirm new password"
+                      value={confirmPassword}
+                      onChange={(event) =>
+                        setConfirmPassword(event.target.value)
+                      }
+                      minLength={8}
+                      required
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShowConfirmPassword(!showConfirmPassword)
+                      }
+                    >
+                      {showConfirmPassword ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                </div>
+
+                {error && (
+                  <div className="error-text" role="alert">
+                    {error}
+                  </div>
+                )}
+
+                <Button
+                  type="submit"
+                  className="full-width auth-submit"
+                  disabled={loading}
+                >
+                  {loading ? "Updating Password..." : "Update Password"}
+                </Button>
+              </form>
+            </>
+          )}
+        </section>
+      </div>
+    </main>
+  )
+}
+
 function RoleLoginCard({
   role,
   go,
@@ -2001,6 +2287,7 @@ function RoleLoginCard({
 }) {
   const [show, setShow] = useState(false)
   const [resetSent, setResetSent] = useState(false)
+  const [resetLoading, setResetLoading] = useState(false)
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [loading, setLoading] = useState(false)
@@ -2121,9 +2408,46 @@ function RoleLoginCard({
             <input type="checkbox" />
             <span>Remember me</span>
           </label>
-          <button type="button" onClick={() => setResetSent(true)}>
-            Forgot password?
-          </button>
+          <button
+  type="button"
+  disabled={resetLoading}
+  onClick={async () => {
+    const userEmail = email.trim()
+
+    setError("")
+    setResetSent(false)
+
+    if (!userEmail) {
+      setError("Please enter your registered email address first.")
+      return
+    }
+
+    setResetLoading(true)
+
+try {
+  const { error } = await supabase.auth.resetPasswordForEmail(
+    userEmail,
+    {
+      redirectTo: `${window.location.origin}/?type=recovery`,
+    },
+  )
+
+  if (error) throw error
+
+  setResetSent(true)
+} catch (resetError) {
+  setError(
+    resetError instanceof Error
+      ? resetError.message
+      : "Unable to send password reset email.",
+  )
+} finally {
+  setResetLoading(false)
+}
+  }}
+>
+  {resetLoading ? "Sending reset email..." : "Forgot password?"}
+</button>
         </div>
         <Button
           type="submit"
@@ -2498,6 +2822,7 @@ function FormField({
   error,
   required,
   min,
+  step,
 }: {
   label: string
   placeholder?: string
@@ -2507,6 +2832,7 @@ function FormField({
   error?: string
   required?: boolean
   min?: number
+  step?: number | string
 }) {
   return (
     <div className={error ? "form-field has-error" : "form-field"}>
@@ -2520,6 +2846,7 @@ function FormField({
         value={value}
         required={required}
         min={min}
+        step={step}
         onChange={(e) => onChange?.(e.target.value)}
       />
       {error && <span className="error-text">{error}</span>}
@@ -2926,7 +3253,7 @@ function Dashboard({
   toggleSave: (id: EventItem["id"]) => void
   registrations: RegistrationRecord[]
   profile: UserProfile | null
-  saveProfile: (profile: UserProfile) => void
+  saveProfile: (profile: UserProfile) => Promise<string>
   publishedEvents: EventItem[]
   eventsLoading: boolean
   eventsError: string
@@ -2936,9 +3263,21 @@ function Dashboard({
   selectEvent: (id: EventItem["id"]) => void
 }) {
   const publicMode = !profile
-  const [tab, setTab] = useState(initialTab)
+  const [tab, setTab] = useState(() => readStoredTab(
+    "eventify.participant.dashboardTab",
+    initialTab,
+    "dashboard",
+    ["dashboard", "registrations", "pending", "approved", "rejected", "tickets", "profile"],
+  ))
   const [cancelOpen, setCancelOpen] = useState(false)
-  useEffect(() => setTab(initialTab), [initialTab])
+  const previousInitialTab = useRef(initialTab)
+  useEffect(() => {
+    if (previousInitialTab.current !== initialTab) setTab(initialTab)
+    previousInitialTab.current = initialTab
+  }, [initialTab])
+  useEffect(() => {
+    window.sessionStorage.setItem("eventify.participant.dashboardTab", tab)
+  }, [tab])
   return (
     <main className="dashboard-shell">
       <DashboardSidebar
@@ -3101,11 +3440,26 @@ function DashboardTop({
   notifications?: number
   publicMode?: boolean
 }) {
+  const [currentDate, setCurrentDate] = useState(() => new Date())
+  useEffect(() => {
+    const updateDate = () => setCurrentDate(new Date())
+    const intervalId = window.setInterval(updateDate, 60_000)
+    window.addEventListener("focus", updateDate)
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener("focus", updateDate)
+    }
+  }, [])
   return (
     <header className="dashboard-top">
       <div>
         <h1>{title}</h1>
-        <p>Sunday, March 29, 2026</p>
+        <p>{currentDate.toLocaleDateString(undefined, {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+          year: "numeric",
+        })}</p>
       </div>
       <div>
         {publicMode ? (
@@ -3708,105 +4062,225 @@ function ProfileSettings({
   onSave,
 }: {
   profile: UserProfile | null
-  onSave: (profile: UserProfile) => void
+  onSave: (profile: UserProfile) => Promise<string>
 }) {
-  const [saved, setSaved] = useState(false)
+  const [tab, setTab] = useState<"profile" | "security" | "notifications">("profile")
   const [fullName, setFullName] = useState(profile?.fullName || "")
   const [email, setEmail] = useState(profile?.email || "")
   const [phone, setPhone] = useState(profile?.phone || "")
   const [organization, setOrganization] = useState(profile?.organization || "")
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState("")
+  const [error, setError] = useState("")
+  const [preferencesError, setPreferencesError] = useState("")
+  const [newPassword, setNewPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [preferences, setPreferences] = useState(defaultNotificationPreferences)
+  const [preferencesLoading, setPreferencesLoading] = useState(true)
+
+  useEffect(() => {
+    setFullName(profile?.fullName || "")
+    setPhone(profile?.phone || "")
+    setOrganization(profile?.organization || "")
+  }, [profile])
+
+  useEffect(() => {
+    let active = true
+    const loadPreferences = async () => {
+      try {
+        const { data, error: userError } = await supabase.auth.getUser()
+        if (userError) throw new Error(`Could not load notification preferences: ${userError.message}`)
+        if (!data.user) throw new Error("Please sign in again to manage notification preferences.")
+        const stored = data.user.user_metadata?.notification_preferences
+        if (stored && typeof stored === "object") {
+          setPreferences({
+            eventReminders: typeof stored.eventReminders === "boolean"
+              ? stored.eventReminders
+              : defaultNotificationPreferences.eventReminders,
+            registrationUpdates: typeof stored.registrationUpdates === "boolean"
+              ? stored.registrationUpdates
+              : defaultNotificationPreferences.registrationUpdates,
+            recommendedEvents: typeof stored.recommendedEvents === "boolean"
+              ? stored.recommendedEvents
+              : defaultNotificationPreferences.recommendedEvents,
+          })
+        }
+      } catch (loadError) {
+        if (active) setPreferencesError(loadError instanceof Error ? loadError.message : "Could not load notification preferences.")
+      } finally {
+        if (active) setPreferencesLoading(false)
+      }
+    }
+    void loadPreferences()
+    return () => { active = false }
+  }, [])
+
+  const savePersonalInformation = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSaving(true)
+    setMessage("")
+    setError("")
+    try {
+      const savedMessage = await onSave({
+        fullName: fullName.trim(),
+        email: email.trim(),
+        phone: phone.trim(),
+        organization: organization.trim(),
+        role: profile?.role || "participant",
+        organizerStatus: profile?.organizerStatus || "not_requested",
+      })
+      setMessage(savedMessage)
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Could not save your profile.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const changePassword = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setMessage("")
+    setError("")
+    if (newPassword.length < 8) {
+      setError("Your new password must be at least 8 characters long.")
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setError("The new password and confirmation do not match.")
+      return
+    }
+    setSaving(true)
+    try {
+      const { error: passwordError } = await supabase.auth.updateUser({ password: newPassword })
+      if (passwordError) throw new Error(`Could not change your password: ${passwordError.message}`)
+      setNewPassword("")
+      setConfirmPassword("")
+      setMessage("Your password has been changed.")
+    } catch (passwordError) {
+      setError(passwordError instanceof Error ? passwordError.message : "Could not change your password.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveNotificationPreferences = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSaving(true)
+    setMessage("")
+    setError("")
+    try {
+      const { data, error: userError } = await supabase.auth.getUser()
+      if (userError) throw new Error(`Could not verify your account: ${userError.message}`)
+      if (!data.user) throw new Error("Please sign in again to manage notification preferences.")
+      const { error: updateError } = await supabase.auth.updateUser({
+        data: {
+          ...data.user.user_metadata,
+          notification_preferences: preferences,
+        },
+      })
+      if (updateError) throw new Error(`Could not save notification preferences: ${updateError.message}`)
+      setMessage("Notification preferences saved.")
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Could not save notification preferences.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const selectTab = (nextTab: typeof tab) => {
+    setTab(nextTab)
+    setMessage("")
+    setError("")
+  }
+
   return (
     <section className="settings-layout">
-      <div className="settings-nav">
-        <button className="active">Personal information</button>
-        <button>Security</button>
-        <button>Notifications</button>
-      </div>
-      <form
-        className="settings-card"
-        onSubmit={(e) => {
-          e.preventDefault()
-          onSave({
-            fullName: fullName.trim(),
-            email: email.trim(),
-            phone: phone.trim(),
-            organization: organization.trim(),
-            role: profile?.role || "participant",
-            organizerStatus: profile?.organizerStatus || "not_requested",
-          })
-          setSaved(true)
-        }}
-      >
-        <h2>Personal information</h2>
-        <p>Update your account details and contact information.</p>
-        {saved && (
-          <div className="form-success">
-            <Icon name="check" size={17} /> Profile changes saved.
+      <nav className="settings-nav" aria-label="Profile settings">
+        <button type="button" aria-pressed={tab === "profile"} className={tab === "profile" ? "active" : ""} onClick={() => selectTab("profile")}>Personal information</button>
+        <button type="button" aria-pressed={tab === "security"} className={tab === "security" ? "active" : ""} onClick={() => selectTab("security")}>Security</button>
+        <button type="button" aria-pressed={tab === "notifications"} className={tab === "notifications" ? "active" : ""} onClick={() => selectTab("notifications")}>Notifications</button>
+      </nav>
+      {tab === "profile" && (
+        <form className="settings-card" onSubmit={(event) => void savePersonalInformation(event)}>
+          <h2>Personal information</h2>
+          <p>Update your account details and contact information.</p>
+          {message && <div className="form-success" role="status"><Icon name="check" size={17} /> {message}</div>}
+          {error && <div className="error-text" role="alert">{error}</div>}
+          <div className="profile-photo">
+            <span>
+              {profileInitials({
+                fullName,
+                email,
+                phone,
+                organization,
+                role: profile?.role || "participant",
+                organizerStatus: profile?.organizerStatus || "not_requested",
+              })}
+            </span>
+            <div>
+              <strong>{fullName || "Your profile"}</strong>
+              <small>{email || "Add your email address"}</small>
+            </div>
           </div>
-        )}
-        <div className="profile-photo">
-          <span>
-            {profileInitials({
-              fullName,
-              email,
-              phone,
-              organization,
-              role: profile?.role || "participant",
-              organizerStatus: profile?.organizerStatus || "not_requested",
-            })}
-          </span>
-          <div>
-            <strong>{fullName || "Your profile"}</strong>
-            <small>{email || "Add your email address"}</small>
+          <div className="form-grid">
+            <FormField label="Full name" placeholder="Enter your full name" value={fullName} onChange={setFullName} required />
+            <FormField label="Email address" placeholder="you@college.edu" type="email" value={email} onChange={setEmail} required />
+            <FormField label="Phone number" placeholder="Add your phone number" value={phone} onChange={setPhone} />
+            <FormField label="College or organization" placeholder="Add your college or organization" value={organization} onChange={setOrganization} />
           </div>
-        </div>
-        <div className="form-grid">
-          <FormField
-            label="Full name"
-            placeholder="Enter your full name"
-            value={fullName}
-            onChange={setFullName}
-            required
-          />
-          <FormField
-            label="Email address"
-            placeholder="you@college.edu"
-            type="email"
-            value={email}
-            onChange={setEmail}
-            required
-          />
-          <FormField
-            label="Phone number"
-            placeholder="Add your phone number"
-            value={phone}
-            onChange={setPhone}
-          />
-          <FormField
-            label="College or organization"
-            placeholder="Add your college or organization"
-            value={organization}
-            onChange={setOrganization}
-          />
-        </div>
-        <div className="notification-options">
-          <h3>Notification preferences</h3>
-          {[
-            "Event reminders",
-            "Registration updates",
-            "Recommended events",
-          ].map((item) => (
-            <label key={item}>
-              <span>
-                <strong>{item}</strong>
-                <small>Receive timely {item.toLowerCase()}.</small>
-              </span>
-              <input type="checkbox" defaultChecked />
-            </label>
-          ))}
-        </div>
-        <Button type="submit">Save changes</Button>
-      </form>
+          <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
+        </form>
+      )}
+      {tab === "security" && (
+        <form className="settings-card" onSubmit={(event) => void changePassword(event)}>
+          <h2>Security</h2>
+          <p>Choose a new password for your Eventify account.</p>
+          {message && <div className="form-success" role="status"><Icon name="check" size={17} /> {message}</div>}
+          {error && <div className="error-text" role="alert">{error}</div>}
+          <div className="form-grid">
+            <FormField label="New password" type="password" value={newPassword} onChange={setNewPassword} required />
+            <FormField label="Confirm new password" type="password" value={confirmPassword} onChange={setConfirmPassword} required />
+          </div>
+          <p className="settings-hint">Use at least 8 characters. Your password is updated securely through Supabase Auth.</p>
+          <Button type="submit" disabled={saving}>{saving ? "Updating…" : "Change password"}</Button>
+        </form>
+      )}
+      {tab === "notifications" && (
+        <form className="settings-card" onSubmit={(event) => void saveNotificationPreferences(event)}>
+          <h2>Notifications</h2>
+          <p>Choose which Eventify updates you want to receive.</p>
+          {message && <div className="form-success" role="status"><Icon name="check" size={17} /> {message}</div>}
+          {(error || preferencesError) && <div className="error-text" role="alert">{error || preferencesError}</div>}
+          {preferencesLoading ? (
+            <p role="status">Loading your notification preferences…</p>
+          ) : preferencesError ? (
+            <p>Reload this page to try loading your preferences again.</p>
+          ) : (
+            <>
+              <div className="notification-options">
+                {([
+                  ["eventReminders", "Event reminders", "Receive reminders about events you have registered for."],
+                  ["registrationUpdates", "Registration updates", "Receive updates about registration decisions and changes."],
+                  ["recommendedEvents", "Recommended events", "Receive recommendations for published campus events."],
+                ] as const).map(([key, title, description]) => (
+                  <label key={key}>
+                    <span><strong>{title}</strong><small>{description}</small></span>
+                    <input
+                      type="checkbox"
+                      checked={preferences[key]}
+                      onChange={(changeEvent) => setPreferences((current) => ({
+                        ...current,
+                        [key]: changeEvent.target.checked,
+                      }))}
+                    />
+                  </label>
+                ))}
+              </div>
+              <Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save preferences"}</Button>
+            </>
+          )}
+        </form>
+      )}
     </section>
   )
 }
@@ -3844,7 +4318,7 @@ function Organizer({
   registrations: RegistrationRecord[]
   updateRegistration: (id: string, status: RegistrationStatus) => Promise<void>
   profile: UserProfile | null
-  saveProfile: (profile: UserProfile) => void
+  saveProfile: (profile: UserProfile) => Promise<string>
   selectEvent: (id: EventItem["id"]) => void
   onPublishEvent: (
     event: NewEventInput,
@@ -3874,11 +4348,23 @@ function Organizer({
     ["settings", "settings", "Profile settings"],
     ["participant", "users", "Switch to participant"],
   ]
-  const [tab, setTab] = useState(initialTab)
+  const [tab, setTab] = useState(() => readStoredTab(
+    "eventify.organizer.dashboardTab",
+    initialTab,
+    "overview",
+    ["overview", "create", "manage", "participants", "approved", "rejected", "settings"],
+  ))
   const [eventToCancel, setEventToCancel] = useState<EventItem | null>(null)
   const [editingEvent, setEditingEvent] = useState<EventItem | null>(null)
   const [eventActionError, setEventActionError] = useState("")
-  useEffect(() => setTab(initialTab), [initialTab])
+  const previousInitialTab = useRef(initialTab)
+  useEffect(() => {
+    if (previousInitialTab.current !== initialTab) setTab(initialTab)
+    previousInitialTab.current = initialTab
+  }, [initialTab])
+  useEffect(() => {
+    window.sessionStorage.setItem("eventify.organizer.dashboardTab", tab)
+  }, [tab])
   const cancelEvent = async () => {
     if (!eventToCancel) return
     try {
@@ -4116,7 +4602,7 @@ function CreateEvent({
     organizingDepartment: editEvent?.organizingDepartment || "",
     targetDepartments: editEvent?.targetDepartments || [],
     capacity: String(editEvent?.seats ?? 100),
-    price: "0",
+    price: String(editEvent?.registrationFee ?? 0),
   })
   const [people, setPeople] = useState<EventPerson[]>(editEvent?.people || [])
   const [peopleBaseline, setPeopleBaseline] = useState<EventPerson[]>(editEvent?.people || [])
@@ -4202,6 +4688,14 @@ function CreateEvent({
       setError(imageError)
       return
     }
+    if (!Number.isFinite(Number(form.price)) || Number(form.price) < 0) {
+      setError("Enter a valid registration fee of zero or more.")
+      return
+    }
+    if (Math.abs(Number(form.price) * 100 - Math.round(Number(form.price) * 100)) > 1e-8) {
+      setError("Registration fees can have at most two decimal places.")
+      return
+    }
     const submitter = (e.nativeEvent as SubmitEvent).submitter
     const action = submitter instanceof HTMLButtonElement
       ? submitter.value
@@ -4222,6 +4716,7 @@ function CreateEvent({
       organizingDepartment: form.organizingDepartment,
       targetDepartments: form.targetDepartments,
       capacity: Number(form.capacity),
+      price: Number(form.price),
       startTime: form.startTime,
       endTime: form.endTime,
     }
@@ -4236,6 +4731,7 @@ function CreateEvent({
           organizingDepartment: editEvent.organizingDepartment || "",
           targetDepartments: editEvent.targetDepartments || [],
           capacity: editEvent.seats,
+          price: editEvent.registrationFee,
           startTime: timeInputValue(editEvent.startTimeValue),
           endTime: timeInputValue(editEvent.endTimeValue),
         }
@@ -4507,6 +5003,7 @@ function CreateEvent({
                 value={form.price}
                 onChange={(value) => updateForm("price", value)}
                 min={0}
+                step="0.01"
               />
             </div>
             <FormField
@@ -5624,8 +6121,15 @@ function ConfirmModal({
 export default function App() {
   const [page, setPage] = useState<Page>("home")
   const [profile, setProfile] = useState<UserProfile | null>(null)
-  const [selectedEventId, setSelectedEventId] = useState<EventItem["id"] | null>(null)
-  const selectedEventIdRef = useRef<EventItem["id"] | null>(null)
+ const [selectedEventId, setSelectedEventId] = useState<EventItem["id"] | null>(() => {
+  try {
+    return sessionStorage.getItem("eventify:selected-event") as EventItem["id"] | null
+  } catch {
+    return null
+  }
+})
+
+const selectedEventIdRef = useRef<EventItem["id"] | null>(selectedEventId)
   const [eventSearchQuery, setEventSearchQuery] = useState("")
   const pendingRegistrationEventId = useRef<EventItem["id"] | null>(null)
   const chooseEvent = (eventId: EventItem["id"]) => {
@@ -5638,7 +6142,45 @@ export default function App() {
     useState<EmailConfirmationState>({ status: "idle" })
   const profileRef = useRef(profile)
   const authSequence = useRef(0)
+  const savedPageRef = useRef<Page | null>(
+  (() => {
+    try {
+      const saved = sessionStorage.getItem("eventify:last-page")
+      const validPages: Page[] = [
+        "home", "explore", "details", "login",
+        "participant-login", "organizer-login",
+        "signup", "organizer-signup", "participant-signup",
+        "register", "review", "confirmation",
+        "email-callback", "reset-password",
+        "dashboard", "profile", "organizer",
+        "admin", "notifications",
+      ]
+      return saved && validPages.includes(saved as Page)
+        ? saved as Page
+        : null
+    } catch {
+      return null
+    }
+  })(),
+)
   const eventImageColumn = useRef<EventImageColumn | null>(null)
+  const eventPriceColumn = useRef<boolean | null>(null)
+  const hasEventPriceColumn = async () => {
+    if (eventPriceColumn.current !== null) return eventPriceColumn.current
+    const { error } = await supabase.from("events").select("price").limit(0)
+    if (!error) {
+      eventPriceColumn.current = true
+      return true
+    }
+    if (
+      error.code === "42703" ||
+      /column .* does not exist|could not find .*column|schema cache/i.test(error.message)
+    ) {
+      eventPriceColumn.current = false
+      return false
+    }
+    throw new Error(`Could not inspect event registration fees: ${error.message}`)
+  }
   const getEventImageColumn = async (): Promise<EventImageColumn> => {
     if (eventImageColumn.current) return eventImageColumn.current
     for (const column of ["image_url", "image"] as const) {
@@ -5663,6 +6205,7 @@ export default function App() {
     includeCategory = true,
   ) => {
     const imageColumn = await getEventImageColumn()
+    const includePrice = await hasEventPriceColumn()
     return [
       "id",
       "title",
@@ -5676,6 +6219,7 @@ export default function App() {
       "end_time",
       "registration_deadline",
       "capacity",
+      ...(includePrice ? ["price"] : []),
       "status",
       imageColumn,
       ...(includeOrganizerId ? ["organizer_id"] : []),
@@ -5701,7 +6245,7 @@ export default function App() {
     if (result.error) throw result.error
     return result.data || []
   }
-  const fetchProfile = async (userId: string): Promise<UserProfile> => {
+  const fetchProfile = async (userId: string, authEmail?: string | null): Promise<UserProfile> => {
     const { data, error } = await supabase
       .from("profiles")
       .select("full_name, email, phone, organization, role, organizer_status")
@@ -5720,9 +6264,16 @@ export default function App() {
     ) {
       throw new Error("Your organizer application status is invalid. Please contact support.")
     }
+    if (authEmail && authEmail.toLowerCase() !== (data.email || "").toLowerCase()) {
+      const { error: emailSyncError } = await supabase
+        .from("profiles")
+        .update({ email: authEmail })
+        .eq("id", userId)
+      if (emailSyncError) throw new Error(`Could not sync your confirmed email address: ${emailSyncError.message}`)
+    }
     return {
       fullName: data.full_name || "",
-      email: data.email || "",
+      email: authEmail || data.email || "",
       phone: data.phone || "",
       organization: data.organization || "",
       role: data.role,
@@ -5794,7 +6345,7 @@ export default function App() {
       !(callbackErrorCode || callbackError) &&
       (searchParams.get("email_confirmation") === "1" ||
         hashParams.get("type") === "signup" ||
-        (tokenHashCallback && callbackType === "email"))
+        (tokenHashCallback && (callbackType === "email" || callbackType === "email_change")))
     const removeCallbackParamsFromUrl = () => {
       for (const params of [searchParams, hashParams]) {
         params.delete("error")
@@ -5803,7 +6354,7 @@ export default function App() {
         params.delete("email_confirmation")
         params.delete("register_event")
         params.delete("token_hash")
-        if (params.get("type") === "email") params.delete("type")
+        if (params.get("type") === "email" || params.get("type") === "email_change") params.delete("type")
       }
       const query = searchParams.toString()
       const hash = hashParams.toString()
@@ -5829,7 +6380,7 @@ export default function App() {
         status: "loading",
         message: "Verifying your email address…",
       })
-      if (callbackType !== "email") {
+      if (callbackType !== "email" && callbackType !== "email_change") {
         removeCallbackParamsFromUrl()
         setEmailConfirmationState({
           status: "error",
@@ -5849,24 +6400,44 @@ export default function App() {
     const restoreProfile = async (
       userId: string,
       navigate: boolean,
+      authEmail?: string | null,
     ) => {
       const sequence = ++authSequence.current
       try {
-        const nextProfile = await fetchProfile(userId)
+        const nextProfile = await fetchProfile(userId, authEmail)
         if (!active || sequence !== authSequence.current) return
         profileRef.current = nextProfile
         setProfile(nextProfile)
         setNotificationNavigation(null)
         setAuthError("")
         setVerificationIssue(false)
-        if (navigate) {
-          if (nextProfile.role === "organizer" && nextProfile.organizerStatus !== "approved") {
-            setPage("organizer-login")
-            setAuthError(organizerAccessMessage(nextProfile))
-          } else {
-            setPage(destinationAfterAuthentication(nextProfile))
-          }
-        }
+        if (
+  navigate &&
+  new URLSearchParams(window.location.search).get("type") !== "recovery"
+) {
+  const savedPage = savedPageRef.current
+
+  const canRestoreSavedPage =
+    savedPage !== null &&
+    savedPage !== "reset-password" &&
+    savedPage !== "email-callback" &&
+    savedPage !== "admin" &&
+    (savedPage !== "organizer" || isApprovedOrganizer(nextProfile)) &&
+    (savedPage !== "dashboard" || nextProfile.role === "participant") &&
+    (savedPage !== "profile" || nextProfile.role === "participant")
+
+  if (
+    nextProfile.role === "organizer" &&
+    nextProfile.organizerStatus !== "approved"
+  ) {
+    setPage("organizer-login")
+    setAuthError(organizerAccessMessage(nextProfile))
+  } else if (canRestoreSavedPage && savedPage) {
+    setPage(savedPage)
+  } else {
+    setPage(destinationAfterAuthentication(nextProfile))
+  }
+}
       } catch (error) {
         if (!active || sequence !== authSequence.current) return
         const message = error instanceof Error ? error.message : "Could not load your profile."
@@ -5877,53 +6448,96 @@ export default function App() {
         if (navigate) setPage("home")
       }
     }
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (!session) {
-        authSequence.current += 1
-        if (active) {
-          profileRef.current = null
-          setProfile(null)
-          if (event === "SIGNED_OUT") setPage("home")
-        }
-        return
-      }
-      if (event === "INITIAL_SESSION") {
-        void restoreProfile(session.user.id, !tokenHashCallback)
-      } else {
-        if (tokenHashCallback) return
-        void restoreProfile(
-          session.user.id,
-          confirmationCallback &&
-            event === "SIGNED_IN" &&
-            Boolean(session.user.email_confirmed_at),
-        )
-      }
-    })
+   // Check whether the user arrived through a password recovery link
+const isRecoveryRedirect =
+  new URLSearchParams(window.location.search).get("type") === "recovery"
+
+const { data: authListener } = supabase.auth.onAuthStateChange(
+  (event, session) => {
+
+    // Always prioritize password recovery
+   if (event === "PASSWORD_RECOVERY") {
+  if (active) {
+    setPage("reset-password")
+  }
+
+  // Remove recovery parameters after Supabase processes the recovery event
+  window.history.replaceState(
+    {},
+    document.title,
+    window.location.pathname
+  )
+
+  return
+}
+
+if (!session) {
+  authSequence.current += 1
+
+  if (active) {
+    profileRef.current = null
+    setProfile(null)
+
+    if (event === "SIGNED_OUT") {
+      setPage("home")
+    }
+  }
+
+  return
+}
+
+    if (event === "INITIAL_SESSION") {
+      void restoreProfile(session.user.id, !tokenHashCallback, session.user.email)
+    } else {
+      if (tokenHashCallback) return
+
+      void restoreProfile(
+        session.user.id,
+        confirmationCallback &&
+          event === "SIGNED_IN" &&
+          Boolean(session.user.email_confirmed_at),
+        session.user.email,
+      )
+    }
+  },
+)
     void supabase.auth.getSession().then(({ data, error }) => {
-      if (error) throw error
-      if (data.session) {
-        return restoreProfile(data.session.user.id, !tokenHashCallback)
-      }
-      return undefined
-    }).catch((error: unknown) => {
-      if (!active) return
-      const message = error instanceof Error ? error.message : "Could not restore your session."
-      console.error("Could not restore the Eventify session.", error)
-      setAuthError(message)
-    })
-    if (tokenHashCallback && callbackType === "email" && tokenHash) {
+  if (error) throw error
+
+
+  if (data.session) {
+    return restoreProfile(data.session.user.id, !tokenHashCallback, data.session.user.email)
+  }
+
+  return undefined
+}).catch((error: unknown) => {
+  if (!active) return
+
+  const message =
+    error instanceof Error
+      ? error.message
+      : "Could not restore your session."
+
+  console.error("Could not restore the Eventify session.", error)
+  setAuthError(message)
+})
+    if (
+      tokenHashCallback &&
+      (callbackType === "email" || callbackType === "email_change") &&
+      tokenHash
+    ) {
       void (async () => {
         try {
           const { data, error } = await supabase.auth.verifyOtp({
             token_hash: tokenHash,
-            type: "email",
+            type: callbackType === "email_change" ? "email_change" : "email",
           })
           if (error) throw new Error(error.message)
           if (!data.session || !data.user) {
             throw new Error("Email verification did not establish a session. Request a fresh verification email.")
           }
           removeCallbackParamsFromUrl()
-          const nextProfile = await fetchProfile(data.user.id)
+          const nextProfile = await fetchProfile(data.user.id, data.user.email)
           if (!active) return
           profileRef.current = nextProfile
           setProfile(nextProfile)
@@ -5934,7 +6548,7 @@ export default function App() {
             nextProfile.organizerStatus !== "approved"
           const successMessage = needsOrganizerApproval
             ? `Email confirmed. ${organizerAccessMessage(nextProfile)}`
-            : `Email confirmed. Taking you to your ${nextProfile.role === "organizer" ? "organizer" : "participant"} dashboard.`
+            : `${callbackType === "email_change" ? "Email address updated." : "Email confirmed."} Taking you to your ${nextProfile.role === "organizer" ? "organizer" : "participant"} dashboard.`
           setEmailConfirmationState({
             status: "success",
             message: successMessage,
@@ -6362,10 +6976,11 @@ export default function App() {
         if (registrationError) throw registrationError
         const rows = (registrationRows || []) as RegistrationRow[]
         const eventIds = [...new Set(rows.map((row) => row.event_id))]
+        const eventColumns = eventIds.length ? await eventSelectColumns(false) : ""
         const { data: eventRecords, error: eventsError } = eventIds.length
           ? await supabase
               .from("events")
-              .select("id, title, description, category, venue, event_date, organizing_department, target_departments, start_time, end_time, registration_deadline, capacity, status")
+              .select(eventColumns)
               .in("id", eventIds)
           : { data: [], error: null }
         if (eventsError) throw eventsError
@@ -6477,7 +7092,7 @@ export default function App() {
             data.user.identities.length === 0,
         }
       }
-      const nextProfile = await fetchProfile(data.user.id)
+      const nextProfile = await fetchProfile(data.user.id, data.user.email)
       profileRef.current = nextProfile
       setProfile(nextProfile)
       setNotificationNavigation(null)
@@ -6498,7 +7113,7 @@ export default function App() {
     })
     if (error) throw new Error(error.message)
     if (!data.user) throw new Error("Sign in did not return an authenticated user.")
-    const nextProfile = await fetchProfile(data.user.id)
+    const nextProfile = await fetchProfile(data.user.id, data.user.email)
     if (role === "organizer" && nextProfile.organizerStatus === "pending") {
       const statusMessage = "Your organizer application is pending approval."
       setAuthError(statusMessage)
@@ -6564,16 +7179,44 @@ export default function App() {
       throw new Error(`Unable to request a verification email: ${error.message}`)
     }
   }
-  const saveProfile = (nextProfile: UserProfile) => {
+  const saveProfile = async (nextProfile: UserProfile): Promise<string> => {
     const currentProfile = profileRef.current
-    if (!currentProfile) return
+    if (!currentProfile) throw new Error("Please sign in again to update your profile.")
+    const { data: userData, error: userError } = await supabase.auth.getUser()
+    if (userError) throw new Error(`Could not verify your account: ${userError.message}`)
+    if (!userData.user) throw new Error("Please sign in again to update your profile.")
+    const normalizedEmail = nextProfile.email.trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      throw new Error("Enter a valid email address.")
+    }
     const safeProfile = {
       ...nextProfile,
+      email: currentProfile.email,
       role: currentProfile.role,
       organizerStatus: currentProfile.organizerStatus,
     }
+    const { error: profileError } = await supabase
+      .from("profiles")
+      .update({
+        full_name: safeProfile.fullName,
+        phone: safeProfile.phone,
+        organization: safeProfile.organization,
+      })
+      .eq("id", userData.user.id)
+      .select("id")
+      .single()
+    if (profileError) throw new Error(`Could not save your profile: ${profileError.message}`)
     profileRef.current = safeProfile
     setProfile(safeProfile)
+    if (normalizedEmail !== currentProfile.email.trim().toLowerCase()) {
+      const { error: emailError } = await supabase.auth.updateUser(
+        { email: normalizedEmail },
+        { emailRedirectTo: emailConfirmationRedirectTo() },
+      )
+      if (emailError) throw new Error(`Your profile was saved, but the email change could not be requested: ${emailError.message}`)
+      return "Profile changes saved. Check your new email address to confirm the email change."
+    }
+    return "Profile changes saved."
   }
   const logout = async () => {
     const { error } = await supabase.auth.signOut()
@@ -6748,6 +7391,20 @@ export default function App() {
       setPage("participant-login")
     }
   }, [page, profile])
+  
+  useEffect(() => {
+  try {
+    sessionStorage.setItem("eventify:last-page", page)
+
+    if (selectedEventId) {
+      sessionStorage.setItem("eventify:selected-event", String(selectedEventId))
+    } else {
+      sessionStorage.removeItem("eventify:selected-event")
+    }
+  } catch (error) {
+    console.warn("Could not save navigation state.", error)
+  }
+}, [page, selectedEventId])
   const toggleSave = (id: EventItem["id"]) =>
     setSaved((current) =>
       current.includes(id)
@@ -6765,6 +7422,10 @@ export default function App() {
   ) => {
       const organizerId = await getApprovedOrganizerId()
       const imageColumn = await getEventImageColumn()
+      const includePrice = await hasEventPriceColumn()
+      if (!includePrice && event.price !== 0) {
+        throw new Error("Paid event fees cannot be saved until the event registration fee migration has been applied.")
+      }
       let uploadedImagePath: string | null = null
       let imageUrl: string | null = null
       if (imageFile) {
@@ -6818,6 +7479,7 @@ export default function App() {
         end_time: event.endTime || null,
         registration_deadline: event.registrationDeadline,
         capacity: event.capacity,
+        ...(includePrice ? { price: event.price } : {}),
       }
       const fieldColumns: Record<keyof NewEventInput, string> = {
         title: "title",
@@ -6829,6 +7491,7 @@ export default function App() {
         organizingDepartment: "organizing_department",
         targetDepartments: "target_departments",
         capacity: "capacity",
+        price: "price",
         startTime: "start_time",
         endTime: "end_time",
       }
@@ -6840,6 +7503,7 @@ export default function App() {
           if (field === "status") {
             changedValues.status = status
           } else {
+            if (field === "price" && !includePrice) continue
             const column = fieldColumns[field]
             changedValues[column] = eventValuesByColumn[column]
           }
@@ -7015,6 +7679,7 @@ export default function App() {
       end_time: null,
       registration_deadline: event.registrationDeadline || "",
       capacity: event.seats,
+      price: event.registrationFee,
       organizer_id: "",
       status: event.status,
     }
@@ -7183,6 +7848,11 @@ export default function App() {
           role="participant"
         />
       )}
+
+     {page === "reset-password" && (
+  <ResetPassword go={go} />
+)}
+
       {page === "email-callback" && (
         <main className="registration-page">
           <div className="container narrow-container">
