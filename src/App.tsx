@@ -6142,6 +6142,9 @@ const selectedEventIdRef = useRef<EventItem["id"] | null>(selectedEventId)
     useState<EmailConfirmationState>({ status: "idle" })
   const profileRef = useRef(profile)
   const authSequence = useRef(0)
+  const passwordRecoveryActive = useRef(
+  new URLSearchParams(window.location.search).get("type") === "recovery"
+)
   const savedPageRef = useRef<Page | null>(
   (() => {
     try {
@@ -6411,10 +6414,7 @@ const selectedEventIdRef = useRef<EventItem["id"] | null>(selectedEventId)
         setNotificationNavigation(null)
         setAuthError("")
         setVerificationIssue(false)
-        if (
-  navigate &&
-  new URLSearchParams(window.location.search).get("type") !== "recovery"
-) {
+        if (navigate && !passwordRecoveryActive.current) {
   const savedPage = savedPageRef.current
 
   const canRestoreSavedPage =
@@ -6457,6 +6457,8 @@ const { data: authListener } = supabase.auth.onAuthStateChange(
 
     // Always prioritize password recovery
    if (event === "PASSWORD_RECOVERY") {
+  passwordRecoveryActive.current = true
+
   if (active) {
     setPage("reset-password")
   }
@@ -6479,8 +6481,9 @@ if (!session) {
     setProfile(null)
 
     if (event === "SIGNED_OUT") {
-      setPage("home")
-    }
+  passwordRecoveryActive.current = false
+  setPage("home")
+}
   }
 
   return
