@@ -1,5 +1,5 @@
 {
-  "name": "figma-make-app",
+  "name": "Eventify",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -27,5 +27,10 @@
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
     "vite": "^8.0.5"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "core-js": true
+    }
   }
 }
